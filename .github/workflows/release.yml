@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Run tests
+      run: go test ./...
+
+    - name: Build release binaries
+      run: |
+        mkdir -p dist
+        
+        # Build for multiple platforms
+        platforms=(
+          "linux/amd64"
+          "linux/arm64"
+          "darwin/amd64" 
+          "darwin/arm64"
+          "windows/amd64"
+        )
+        
+        for platform in "${platforms[@]}"; do
+          platform_split=(${platform//\// })
+          GOOS=${platform_split[0]}
+          GOARCH=${platform_split[1]}
+          
+          # Set binary extension for Windows
+          ext=""
+          if [ $GOOS = "windows" ]; then
+            ext=".exe"
+          fi
+          
+          # Build proxy binary
+          output_name="socks5-proxy-${GOOS}-${GOARCH}${ext}"
+          echo "Building $output_name..."
+          env GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-w -s" -o dist/$output_name ./cmd/proxy/main.go
+          
+          # Build API binary  
+          output_name="socks5-api-${GOOS}-${GOARCH}${ext}"
+          echo "Building $output_name..."
+          env GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-w -s" -o dist/$output_name ./cmd/api/main.go
+        done
+
+    - name: Generate checksums
+      run: |
+        cd dist
+        sha256sum * > checksums.txt
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get the tag name
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        
+        # Get previous tag for changelog generation
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+        
+        # Generate changelog
+        if [ -n "$PREV_TAG" ]; then
+          echo "## Changes since $PREV_TAG" > changelog.md
+          git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD >> changelog.md
+        else
+          echo "## Initial Release" > changelog.md
+          echo "First release of SOCKS5 Proxy Analytics" >> changelog.md
+        fi
+        
+        # Set output for release notes
+        {
+          echo 'changelog<<EOF'
+          cat changelog.md
+          echo EOF
+        } >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        body: |
+          ## SOCKS5 Proxy Analytics ${{ github.ref_name }}
+          
+          ${{ steps.changelog.outputs.changelog }}
+          
+          ## Assets
+          
+          ### Binaries
+          - `socks5-proxy-*`: SOCKS5 proxy server binaries
+          - `socks5-api-*`: REST API server binaries  
+          - `checksums.txt`: SHA256 checksums for all binaries
+          
+          ### Docker Images
+          Docker images are automatically built and pushed to GitHub Container Registry:
+          - `ghcr.io/${{ github.repository }}-api:${{ github.ref_name }}`
+          - `ghcr.io/${{ github.repository }}-proxy:${{ github.ref_name }}`
+          
+          ### Installation
+          
+          1. Download the appropriate binary for your platform
+          2. Verify the checksum: `sha256sum -c checksums.txt`
+          3. Make it executable: `chmod +x socks5-proxy-*` or `chmod +x socks5-api-*`
+          4. Run with: `./socks5-proxy-*` or `./socks5-api-*`
+          
+          Or use Docker:
+          ```bash
+          docker run -p 1080:1080 ghcr.io/${{ github.repository }}-proxy:${{ github.ref_name }}
+          docker run -p 8080:8080 ghcr.io/${{ github.repository }}-api:${{ github.ref_name }}
+          ```
+        files: |
+          dist/*
+        generate_release_notes: true
+        draft: false
+        prerelease: ${{ contains(github.ref_name, '-') }}
+
+    - name: Update latest tag
+      if: ${{ !contains(github.ref_name, '-') }}
+      run: |
+        git tag -f latest
+        git push origin latest --force

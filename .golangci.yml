@@ -1,0 +1,220 @@
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    # Enable default linters
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - typecheck
+    - unused
+    
+    # Additional useful linters
+    - bodyclose
+    - contextcheck
+    - cyclop
+    - dupl
+    - errname
+    - errorlint
+    - exhaustive
+    - exportloopref
+    - forbidigo
+    - funlen
+    - gochecknoinits
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - gofmt
+    - gofumpt
+    - goheader
+    - goimports
+    - gomnd
+    - gomodguard
+    - goprintffuncname
+    - gosec
+    - grouper
+    - importas
+    - lll
+    - makezero
+    - misspell
+    - nakedret
+    - nestif
+    - nilerr
+    - nlreturn
+    - noctx
+    - nolintlint
+    - prealloc
+    - predeclared
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - stylecheck
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - wastedassign
+    - whitespace
+
+  disable:
+    - varnamelen  # Variable name length check can be too restrictive
+    - wrapcheck   # Error wrapping check can be overly verbose
+    - exhaustivestruct  # Deprecated
+    - golint      # Deprecated
+    - interfacer  # Deprecated
+    - maligned    # Deprecated
+    - scopelint   # Deprecated
+
+linters-settings:
+  cyclop:
+    max-complexity: 15
+  
+  dupl:
+    threshold: 100
+  
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  
+  exhaustive:
+    default-signifies-exhaustive: false
+  
+  forbidigo:
+    forbid:
+      - ^print.*$
+      - 'fmt\.Print.*'
+  
+  funlen:
+    lines: 100
+    statements: 50
+  
+  gocognit:
+    min-complexity: 15
+  
+  goconst:
+    min-len: 2
+    min-occurrences: 3
+  
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - experimental
+      - opinionated
+      - performance
+      - style
+    disabled-checks:
+      - dupImport
+      - ifElseChain
+      - octalLiteral
+      - whyNoLint
+      - wrapperFunc
+  
+  gocyclo:
+    min-complexity: 15
+  
+  godot:
+    scope: declarations
+    exclude:
+      - "^func Test"
+      - "^func Benchmark"
+  
+  gofmt:
+    simplify: true
+  
+  goimports:
+    local-prefixes: github.com/yourusername/socks5-proxy-analytics
+  
+  gomnd:
+    settings:
+      mnd:
+        checks:
+          - argument
+          - case
+          - condition
+          - operation
+          - return
+  
+  gosec:
+    excludes:
+      - G404  # Use of weak random number generator (math/rand instead of crypto/rand)
+  
+  lll:
+    line-length: 120
+  
+  misspell:
+    locale: US
+  
+  nakedret:
+    max-func-lines: 30
+  
+  nestif:
+    min-complexity: 4
+  
+  nlreturn:
+    block-size: 3
+  
+  nolintlint:
+    allow-leading-space: true
+    allow-unused: false
+    require-explanation: false
+    require-specific: false
+  
+  prealloc:
+    simple: true
+    range-loops: true
+    for-loops: false
+  
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - disableStutteringCheck
+  
+  stylecheck:
+    checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022"]
+  
+  unparam:
+    check-exported: false
+
+issues:
+  exclude-use-default: false
+  exclude:
+    # Exclude some lints that are not relevant in tests
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - funlen
+        - gocognit
+
+  exclude-rules:
+    # Exclude lll issues for long lines with go:generate
+    - linters: [lll]
+      source: "^//go:generate "
+
+    # Exclude some gosec messages
+    - linters: [gosec]
+      text: "G304: Potential file inclusion via variable"
+
+    # Exclude some govet false positives
+    - linters: [govet]
+      text: 'shadow: declaration of "(err|ctx)" shadows declaration at'
+
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new: false
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+  sort-results: true
