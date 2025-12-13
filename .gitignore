@@ -3,10 +3,11 @@
 *.dll
 *.so
 *.dylib
+proxy
+api
 
 # Test binary, build directory, and coverage files
 *.test
-/build/
 *.out
 *.cover
 *.cov
