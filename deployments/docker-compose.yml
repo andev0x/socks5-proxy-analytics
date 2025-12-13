@@ -1,0 +1,35 @@
+
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: socksdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ../../
+      dockerfile: build/docker/Dockerfile.api
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+  proxy:
+    build:
+      context: ../../
+      dockerfile: build/docker/Dockerfile.proxy
+    ports:
+      - "1080:1080"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

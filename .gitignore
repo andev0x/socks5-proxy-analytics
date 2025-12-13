@@ -1,0 +1,55 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, build directory, and coverage files
+*.test
+/build/
+*.out
+*.cover
+*.cov
+
+# Dependency directories (Go Modules)
+/pkg/mod/
+
+# Logs
+*.log
+
+# IDE and editor settings
+.vscode/
+.idea/
+# Editor temporary files (Vim/Emacs/etc.)
+*.swp
+*.swo
+*.swn
+*.bak
+
+# GoLand project files
+*.iml
+*.ipr
+*.iws
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Docker related files
+docker-compose.override.yml
+
+# Config files with sensitive data
+configs/config.yml
+
+# Environment files with credentials
+.env
+.env.local
+.env.*.local
+
+# Coverage reports
+*.lcov
+coverage.out
+
+# Temporary files (Generic)
+*.tmp
+*.temp
