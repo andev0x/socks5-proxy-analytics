@@ -1,12 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
+// Config holds all application configuration loaded from
+// config files and environment variables.
 type Config struct {
 	Proxy struct {
 		Address string `mapstructure:"address"`
@@ -52,60 +55,41 @@ type Config struct {
 	} `mapstructure:"rate_limit"`
 }
 
+// Load loads application configuration from:
+// 1. .env file (if present)
+// 2. config.yml file
+// 3. environment variables (highest priority)
+//
+// It validates that required database settings are provided.
 func Load() (*Config, error) {
-	// Load .env file if it exists
+	// Load .env file if it exists (no error if missing).
 	_ = godotenv.Load()
 
 	viper.SetConfigName("config")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath("./configs")
 
-	// Set defaults
 	setDefaults()
 
-	// Try to read config file, but don't fail if it doesn't exist
+	// Read config file if present.
 	if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
 	}
 
-	// Override with environment variables
-	viper.BindEnv("proxy.address", "PROXY_ADDRESS")
-	viper.BindEnv("proxy.port", "PROXY_PORT")
-	viper.BindEnv("proxy.auth.enabled", "PROXY_AUTH_ENABLED")
-	viper.BindEnv("proxy.auth.username", "PROXY_AUTH_USERNAME")
-	viper.BindEnv("proxy.auth.password", "PROXY_AUTH_PASSWORD")
-	viper.BindEnv("proxy.max_connections", "PROXY_MAX_CONNECTIONS")
-
-	viper.BindEnv("api.address", "API_ADDRESS")
-	viper.BindEnv("api.port", "API_PORT")
-
-	// Database - credentials from environment
-	viper.BindEnv("database.host", "DB_HOST")
-	viper.BindEnv("database.port", "DB_PORT")
-	viper.BindEnv("database.user", "DB_USER")
-	viper.BindEnv("database.password", "DB_PASSWORD")
-	viper.BindEnv("database.database", "DB_NAME")
-	viper.BindEnv("database.sslmode", "DB_SSLMODE")
-
-	viper.BindEnv("pipeline.workers", "PIPELINE_WORKERS")
-	viper.BindEnv("pipeline.buffer_size", "PIPELINE_BUFFER_SIZE")
-	viper.BindEnv("pipeline.batch_size", "PIPELINE_BATCH_SIZE")
-	viper.BindEnv("pipeline.flush_interval_ms", "PIPELINE_FLUSH_INTERVAL_MS")
-
-	viper.BindEnv("logging.level", "LOG_LEVEL")
-	viper.BindEnv("logging.format", "LOG_FORMAT")
-
-	viper.BindEnv("rate_limit.enabled", "RATE_LIMIT_ENABLED")
-	viper.BindEnv("rate_limit.requests_per_second", "RATE_LIMIT_RPS")
+	// Bind environment variables.
+	if err := bindEnvs(); err != nil {
+		return nil, err
+	}
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
-	// Validate required credentials
+	// Validate required database configuration.
 	if cfg.Database.Host == "" {
 		return nil, fmt.Errorf("critical: DB_HOST environment variable not set")
 	}
@@ -122,8 +106,44 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
+// bindEnvs binds all supported environment variables to viper keys.
+func bindEnvs() error {
+	bindings := map[string]string{
+		"proxy.address":                  "PROXY_ADDRESS",
+		"proxy.port":                     "PROXY_PORT",
+		"proxy.auth.enabled":             "PROXY_AUTH_ENABLED",
+		"proxy.auth.username":            "PROXY_AUTH_USERNAME",
+		"proxy.auth.password":            "PROXY_AUTH_PASSWORD",
+		"proxy.max_connections":          "PROXY_MAX_CONNECTIONS",
+		"api.address":                    "API_ADDRESS",
+		"api.port":                       "API_PORT",
+		"database.host":                  "DB_HOST",
+		"database.port":                  "DB_PORT",
+		"database.user":                  "DB_USER",
+		"database.password":              "DB_PASSWORD",
+		"database.database":              "DB_NAME",
+		"database.sslmode":               "DB_SSLMODE",
+		"pipeline.workers":               "PIPELINE_WORKERS",
+		"pipeline.buffer_size":           "PIPELINE_BUFFER_SIZE",
+		"pipeline.batch_size":            "PIPELINE_BATCH_SIZE",
+		"pipeline.flush_interval_ms":     "PIPELINE_FLUSH_INTERVAL_MS",
+		"logging.level":                  "LOG_LEVEL",
+		"logging.format":                 "LOG_FORMAT",
+		"rate_limit.enabled":             "RATE_LIMIT_ENABLED",
+		"rate_limit.requests_per_second": "RATE_LIMIT_RPS",
+	}
+
+	for key, env := range bindings {
+		if err := viper.BindEnv(key, env); err != nil {
+			return fmt.Errorf("failed to bind env %s: %w", env, err)
+		}
+	}
+
+	return nil
+}
+
+// setDefaults sets safe default values for non-sensitive configuration.
 func setDefaults() {
-	// Safe defaults only - NO credentials
 	viper.SetDefault("proxy.address", "0.0.0.0")
 	viper.SetDefault("proxy.port", 1080)
 	viper.SetDefault("proxy.max_connections", 10000)
@@ -132,10 +152,9 @@ func setDefaults() {
 	viper.SetDefault("api.address", "0.0.0.0")
 	viper.SetDefault("api.port", 8080)
 
-	// Database - no defaults for sensitive data
-	// These MUST be provided via environment variables or config file
+	// Database defaults (no credentials).
 	viper.SetDefault("database.host", "")
-	viper.SetDefault("database.port", 5432) // Safe default for port
+	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("database.user", "")
 	viper.SetDefault("database.password", "")
 	viper.SetDefault("database.database", "")

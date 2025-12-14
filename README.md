@@ -428,8 +428,7 @@ Structured logging with Zap provides:
 
 ## [License](LICENSE)
 
-This project is provided as-is for educational and professional purposes.
+> This project is provided as-is for educational and professional purposes.
 
 ## [Author](github.com/andev0x)
 
-anvndev - Full-stack developer passionate about systems programming and networking.
