@@ -1,3 +1,4 @@
+// Package models defines data structures for traffic logs and statistics.
 package models
 
 import (
@@ -6,6 +7,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// TrafficLog represents a single traffic event through the proxy.
 type TrafficLog struct {
 	ID            uint           `gorm:"primaryKey" json:"id"`
 	SourceIP      string         `gorm:"index" json:"source_ip"`
@@ -21,12 +23,12 @@ type TrafficLog struct {
 	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
-// TableName specifies the table name
+// TableName specifies the table name.
 func (TrafficLog) TableName() string {
 	return "traffic_logs"
 }
 
-// DomainStats represents statistics for a domain
+// DomainStats represents statistics for a domain.
 type DomainStats struct {
 	Domain        string  `json:"domain"`
 	Count         int64   `json:"count"`
@@ -35,7 +37,7 @@ type DomainStats struct {
 	AvgLatency    float64 `json:"avg_latency_ms"`
 }
 
-// SourceIPStats represents statistics for a source IP
+// SourceIPStats represents statistics for a source IP.
 type SourceIPStats struct {
 	SourceIP      string  `json:"source_ip"`
 	Count         int64   `json:"count"`
@@ -44,7 +46,7 @@ type SourceIPStats struct {
 	AvgLatency    float64 `json:"avg_latency_ms"`
 }
 
-// TrafficStats represents overall traffic statistics
+// TrafficStats represents overall traffic statistics.
 type TrafficStats struct {
 	TotalConnections int64   `json:"total_connections"`
 	TotalBytesIn     int64   `json:"total_bytes_in"`

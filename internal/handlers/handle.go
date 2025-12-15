@@ -1,4 +1,5 @@
-package api
+// Package handlers provides HTTP handlers for the analytics API.
+package handlers
 
 import (
 	"net/http"
@@ -10,11 +11,13 @@ import (
 	"go.uber.org/zap"
 )
 
+// Handler handles HTTP requests for the analytics API.
 type Handler struct {
 	repo storage.Repository
 	log  *zap.Logger
 }
 
+// NewHandler creates a new HTTP handler with the given repository and logger.
 func NewHandler(repo storage.Repository, log *zap.Logger) *Handler {
 	return &Handler{
 		repo: repo,
@@ -22,6 +25,7 @@ func NewHandler(repo storage.Repository, log *zap.Logger) *Handler {
 	}
 }
 
+// GetTopDomains returns the top domains by connection count.
 func (h *Handler) GetTopDomains(c *gin.Context) {
 	limit := 10
 	if l := c.Query("limit"); l != "" {
@@ -34,11 +38,14 @@ func (h *Handler) GetTopDomains(c *gin.Context) {
 	if err != nil {
 		h.log.Error("failed to get top domains", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve top domains"})
+
 		return
 	}
+
 	c.JSON(http.StatusOK, domains)
 }
 
+// GetTopSourceIPs returns the top source IPs by connection count.
 func (h *Handler) GetTopSourceIPs(c *gin.Context) {
 	limit := 10
 	if l := c.Query("limit"); l != "" {
@@ -51,11 +58,14 @@ func (h *Handler) GetTopSourceIPs(c *gin.Context) {
 	if err != nil {
 		h.log.Error("failed to get top source IPs", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve top source IPs"})
+
 		return
 	}
+
 	c.JSON(http.StatusOK, ips)
 }
 
+// GetTrafficStats returns aggregate traffic statistics for a time range.
 func (h *Handler) GetTrafficStats(c *gin.Context) {
 	startStr := c.Query("start")
 	endStr := c.Query("end")
@@ -82,11 +92,14 @@ func (h *Handler) GetTrafficStats(c *gin.Context) {
 	if err != nil {
 		h.log.Error("failed to get traffic stats", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve traffic stats"})
+
 		return
 	}
+
 	c.JSON(http.StatusOK, stats)
 }
 
+// GetTrafficLogs returns paginated traffic logs for a time range.
 func (h *Handler) GetTrafficLogs(c *gin.Context) {
 	limit := 100
 	offset := 0
@@ -127,11 +140,14 @@ func (h *Handler) GetTrafficLogs(c *gin.Context) {
 	if err != nil {
 		h.log.Error("failed to get traffic logs", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve traffic logs"})
+
 		return
 	}
+
 	c.JSON(http.StatusOK, logs)
 }
 
+// Health returns a simple health check response.
 func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

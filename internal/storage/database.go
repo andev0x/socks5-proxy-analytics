@@ -1,3 +1,4 @@
+// Package storage provides database connection and repository implementations.
 package storage
 
 import (
@@ -10,6 +11,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// NewDatabase creates a new database connection using the provided configuration.
 func NewDatabase(cfg *config.Config) (*gorm.DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",

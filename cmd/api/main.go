@@ -1,3 +1,4 @@
+// Package main provides the API server entry point.
 package main
 
 import (
@@ -6,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/andev0x/socks5-proxy-analytics/internal/api"
 	"github.com/andev0x/socks5-proxy-analytics/internal/config"
+	"github.com/andev0x/socks5-proxy-analytics/internal/handlers"
 	"github.com/andev0x/socks5-proxy-analytics/internal/logger"
 	"github.com/andev0x/socks5-proxy-analytics/internal/storage"
 	"github.com/gin-gonic/gin"
@@ -26,7 +27,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)
 		os.Exit(1)
 	}
-	defer log.Sync()
+	defer func() {
+		_ = log.Sync()
+	}()
 
 	zapLog := log.GetZapLogger()
 
@@ -37,7 +40,11 @@ func main() {
 	}
 
 	repo := storage.NewPostgresRepository(db)
-	defer repo.Close()
+	defer func() {
+		if err := repo.Close(); err != nil {
+			zapLog.Error("failed to close repository", zap.Error(err))
+		}
+	}()
 
 	// Setup Gin router
 	if cfg.Logging.Level == "info" || cfg.Logging.Level == "warn" {
@@ -47,7 +54,7 @@ func main() {
 	router := gin.Default()
 
 	// Initialize handler
-	handler := api.NewHandler(repo, zapLog)
+	handler := handlers.NewHandler(repo, zapLog)
 
 	// Register routes
 	router.GET("/health", handler.Health)

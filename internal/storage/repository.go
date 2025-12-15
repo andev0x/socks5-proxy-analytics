@@ -9,35 +9,44 @@ import (
 	"gorm.io/gorm"
 )
 
+// Repository defines the interface for traffic log storage operations.
 type Repository interface {
 	SaveTrafficLog(ctx context.Context, log *models.TrafficLog) error
 	SaveTrafficLogs(ctx context.Context, logs []*models.TrafficLog) error
 	GetTopDomains(ctx context.Context, limit int) ([]models.DomainStats, error)
 	GetTopSourceIPs(ctx context.Context, limit int) ([]models.SourceIPStats, error)
 	GetTrafficStats(ctx context.Context, startTime, endTime time.Time) (*models.TrafficStats, error)
-	GetTrafficByTimeRange(ctx context.Context, startTime, endTime time.Time, limit, offset int) ([]models.TrafficLog, error)
+	GetTrafficByTimeRange(
+		ctx context.Context, startTime, endTime time.Time, limit, offset int,
+	) ([]models.TrafficLog, error)
 	Close() error
 }
 
+// PostgresRepository implements Repository using PostgreSQL.
 type PostgresRepository struct {
 	db *gorm.DB
 }
 
+// NewPostgresRepository creates a new PostgreSQL repository.
 func NewPostgresRepository(db *gorm.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
 }
 
+// SaveTrafficLog saves a single traffic log to the database.
 func (r *PostgresRepository) SaveTrafficLog(ctx context.Context, log *models.TrafficLog) error {
 	return r.db.WithContext(ctx).Create(log).Error
 }
 
+// SaveTrafficLogs saves multiple traffic logs to the database in batches.
 func (r *PostgresRepository) SaveTrafficLogs(ctx context.Context, logs []*models.TrafficLog) error {
 	if len(logs) == 0 {
 		return nil
 	}
+
 	return r.db.WithContext(ctx).CreateInBatches(logs, 100).Error
 }
 
+// GetTopDomains retrieves the top domains by connection count.
 func (r *PostgresRepository) GetTopDomains(ctx context.Context, limit int) ([]models.DomainStats, error) {
 	var stats []models.DomainStats
 	err := r.db.WithContext(ctx).
@@ -58,6 +67,7 @@ func (r *PostgresRepository) GetTopDomains(ctx context.Context, limit int) ([]mo
 	return stats, err
 }
 
+// GetTopSourceIPs retrieves the top source IPs by connection count.
 func (r *PostgresRepository) GetTopSourceIPs(ctx context.Context, limit int) ([]models.SourceIPStats, error) {
 	var stats []models.SourceIPStats
 	err := r.db.WithContext(ctx).
@@ -77,7 +87,10 @@ func (r *PostgresRepository) GetTopSourceIPs(ctx context.Context, limit int) ([]
 	return stats, err
 }
 
-func (r *PostgresRepository) GetTrafficStats(ctx context.Context, startTime, endTime time.Time) (*models.TrafficStats, error) {
+// GetTrafficStats retrieves aggregate traffic statistics for a time range.
+func (r *PostgresRepository) GetTrafficStats(
+	ctx context.Context, startTime, endTime time.Time,
+) (*models.TrafficStats, error) {
 	var stats models.TrafficStats
 	err := r.db.WithContext(ctx).
 		Table("traffic_logs").
@@ -93,7 +106,10 @@ func (r *PostgresRepository) GetTrafficStats(ctx context.Context, startTime, end
 	return &stats, err
 }
 
-func (r *PostgresRepository) GetTrafficByTimeRange(ctx context.Context, startTime, endTime time.Time, limit, offset int) ([]models.TrafficLog, error) {
+// GetTrafficByTimeRange retrieves paginated traffic logs for a time range.
+func (r *PostgresRepository) GetTrafficByTimeRange(
+	ctx context.Context, startTime, endTime time.Time, limit, offset int,
+) ([]models.TrafficLog, error) {
 	var logs []models.TrafficLog
 	err := r.db.WithContext(ctx).
 		Where("timestamp >= ? AND timestamp <= ?", startTime, endTime).
@@ -105,10 +121,12 @@ func (r *PostgresRepository) GetTrafficByTimeRange(ctx context.Context, startTim
 	return logs, err
 }
 
+// Close closes the database connection.
 func (r *PostgresRepository) Close() error {
 	sqlDB, err := r.db.DB()
 	if err != nil {
 		return fmt.Errorf("failed to get database instance: %w", err)
 	}
+
 	return sqlDB.Close()
 }

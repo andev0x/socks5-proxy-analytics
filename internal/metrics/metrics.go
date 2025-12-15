@@ -1,3 +1,4 @@
+// Package metrics provides Prometheus metrics collection and export.
 package metrics
 
 import (
@@ -8,7 +9,7 @@ import (
 	"net/http"
 )
 
-// Metrics holds all Prometheus metrics
+// Metrics holds all Prometheus metrics.
 type Metrics struct {
 	// Connection metrics
 	ActiveConnections prometheus.Gauge
@@ -33,63 +34,82 @@ type Metrics struct {
 	DBErrors        prometheus.Counter
 }
 
-// NewMetrics creates and registers all metrics
+// NewMetrics creates and registers all metrics.
 func NewMetrics() (*Metrics, error) {
-	m := &Metrics{
-		ActiveConnections: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "socks5_proxy_active_connections",
-			Help: "Current number of active proxy connections",
-		}),
-		TotalConnections: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "socks5_proxy_total_connections",
-			Help: "Total number of proxy connections since start",
-		}),
-		ClosedConnections: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "socks5_proxy_closed_connections",
-			Help: "Total number of closed proxy connections",
-		}),
-		BytesIn: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "socks5_proxy_bytes_in_total",
-			Help: "Total bytes received by proxy",
-		}),
-		BytesOut: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "socks5_proxy_bytes_out_total",
-			Help: "Total bytes sent by proxy",
-		}),
-		LatencyHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "socks5_proxy_latency_ms",
-			Help:    "Distribution of connection latencies in milliseconds",
-			Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
-		}),
-		EventsCollected: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "pipeline_events_collected_total",
-			Help: "Total events collected by the pipeline",
-		}),
-		EventsProcessed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "pipeline_events_processed_total",
-			Help: "Total events processed by the normalizer",
-		}),
-		EventsPublished: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "pipeline_events_published_total",
-			Help: "Total events published to the database",
-		}),
-		ProcessingLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "pipeline_processing_latency_ms",
-			Help:    "Pipeline event processing latency in milliseconds",
-			Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500},
-		}),
-		DBQueryDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "db_query_duration_ms",
-			Help:    "Database query duration in milliseconds",
-			Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
-		}),
-		DBErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "db_errors_total",
-			Help: "Total database errors",
-		}),
-	}
+	m := &Metrics{}
+	m.initializeConnectionMetrics()
+	m.initializeTrafficMetrics()
+	m.initializePipelineMetrics()
+	m.initializeDatabaseMetrics()
+	m.registerAllMetrics()
 
-	// Register all metrics
+	return m, nil
+}
+
+func (m *Metrics) initializeConnectionMetrics() {
+	m.ActiveConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "socks5_proxy_active_connections",
+		Help: "Current number of active proxy connections",
+	})
+	m.TotalConnections = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "socks5_proxy_total_connections",
+		Help: "Total number of proxy connections since start",
+	})
+	m.ClosedConnections = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "socks5_proxy_closed_connections",
+		Help: "Total number of closed proxy connections",
+	})
+}
+
+func (m *Metrics) initializeTrafficMetrics() {
+	m.BytesIn = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "socks5_proxy_bytes_in_total",
+		Help: "Total bytes received by proxy",
+	})
+	m.BytesOut = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "socks5_proxy_bytes_out_total",
+		Help: "Total bytes sent by proxy",
+	})
+	m.LatencyHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "socks5_proxy_latency_ms",
+		Help:    "Distribution of connection latencies in milliseconds",
+		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
+	})
+}
+
+func (m *Metrics) initializePipelineMetrics() {
+	m.EventsCollected = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "pipeline_events_collected_total",
+		Help: "Total events collected by the pipeline",
+	})
+	m.EventsProcessed = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "pipeline_events_processed_total",
+		Help: "Total events processed by the normalizer",
+	})
+	m.EventsPublished = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "pipeline_events_published_total",
+		Help: "Total events published to the database",
+	})
+	m.ProcessingLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pipeline_processing_latency_ms",
+		Help:    "Pipeline event processing latency in milliseconds",
+		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500},
+	})
+}
+
+func (m *Metrics) initializeDatabaseMetrics() {
+	m.DBQueryDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "db_query_duration_ms",
+		Help:    "Database query duration in milliseconds",
+		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
+	})
+	m.DBErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "db_errors_total",
+		Help: "Total database errors",
+	})
+}
+
+func (m *Metrics) registerAllMetrics() {
 	prometheus.MustRegister(
 		m.ActiveConnections,
 		m.TotalConnections,
@@ -104,13 +124,12 @@ func NewMetrics() (*Metrics, error) {
 		m.DBQueryDuration,
 		m.DBErrors,
 	)
-
-	return m, nil
 }
 
-// StartMetricsServer starts the Prometheus metrics HTTP server
+// StartMetricsServer starts the Prometheus metrics HTTP server.
 func StartMetricsServer(port int) error {
 	http.Handle("/metrics", promhttp.Handler())
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
+
 	return http.ListenAndServe(addr, nil)
 }
