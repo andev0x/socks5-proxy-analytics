@@ -58,6 +58,7 @@ func TestWorkerPool(t *testing.T) {
 			counterMutex.Lock()
 			defer counterMutex.Unlock()
 			counter++
+
 			return nil
 		})
 		if err != nil {

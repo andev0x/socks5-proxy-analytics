@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// WorkerPool manages a pool of workers processing tasks
+// WorkerPool manages a pool of workers processing tasks.
 type WorkerPool struct {
 	taskChan   chan Task
 	numWorkers int
@@ -17,9 +17,10 @@ type WorkerPool struct {
 	log        *zap.Logger
 }
 
+// Task represents a unit of work to be executed by a worker.
 type Task func() error
 
-// NewWorkerPool creates a new worker pool
+// NewWorkerPool creates a new worker pool.
 func NewWorkerPool(numWorkers int, log *zap.Logger) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -32,7 +33,7 @@ func NewWorkerPool(numWorkers int, log *zap.Logger) *WorkerPool {
 	}
 }
 
-// Start begins processing tasks
+// Start begins processing tasks.
 func (wp *WorkerPool) Start() {
 	for i := 0; i < wp.numWorkers; i++ {
 		wp.wg.Add(1)
@@ -40,7 +41,7 @@ func (wp *WorkerPool) Start() {
 	}
 }
 
-// worker processes tasks from the task channel
+// worker processes tasks from the task channel.
 func (wp *WorkerPool) worker() {
 	defer wp.wg.Done()
 
@@ -59,7 +60,7 @@ func (wp *WorkerPool) worker() {
 	}
 }
 
-// Submit submits a task to the worker pool
+// Submit submits a task to the worker pool.
 func (wp *WorkerPool) Submit(task Task) error {
 	select {
 	case <-wp.ctx.Done():
@@ -69,14 +70,14 @@ func (wp *WorkerPool) Submit(task Task) error {
 	}
 }
 
-// Stop stops the worker pool and waits for all tasks to complete
+// Stop stops the worker pool and waits for all tasks to complete.
 func (wp *WorkerPool) Stop() {
 	wp.cancel()
 	close(wp.taskChan)
 	wp.wg.Wait()
 }
 
-// ConnectionPool manages connection pooling for better resource utilization
+// ConnectionPool manages connection pooling for better resource utilization.
 type ConnectionPool struct {
 	maxConnections int
 	activeConn     int
@@ -84,7 +85,7 @@ type ConnectionPool struct {
 	log            *zap.Logger
 }
 
-// NewConnectionPool creates a new connection pool
+// NewConnectionPool creates a new connection pool.
 func NewConnectionPool(maxConnections int, log *zap.Logger) *ConnectionPool {
 	return &ConnectionPool{
 		maxConnections: maxConnections,
@@ -92,7 +93,7 @@ func NewConnectionPool(maxConnections int, log *zap.Logger) *ConnectionPool {
 	}
 }
 
-// CanAccept checks if a new connection can be accepted
+// CanAccept checks if a new connection can be accepted.
 func (cp *ConnectionPool) CanAccept() bool {
 	cp.mu.RLock()
 	defer cp.mu.RUnlock()
@@ -100,21 +101,23 @@ func (cp *ConnectionPool) CanAccept() bool {
 	return cp.activeConn < cp.maxConnections
 }
 
-// AddConnection increments the active connection count
+// AddConnection increments the active connection count.
 func (cp *ConnectionPool) AddConnection() bool {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
 
 	if cp.activeConn >= cp.maxConnections {
 		cp.log.Warn("max connections reached", zap.Int("max", cp.maxConnections))
+
 		return false
 	}
 
 	cp.activeConn++
+
 	return true
 }
 
-// RemoveConnection decrements the active connection count
+// RemoveConnection decrements the active connection count.
 func (cp *ConnectionPool) RemoveConnection() {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
@@ -124,7 +127,7 @@ func (cp *ConnectionPool) RemoveConnection() {
 	}
 }
 
-// GetActiveConnections returns the current number of active connections
+// GetActiveConnections returns the current number of active connections.
 func (cp *ConnectionPool) GetActiveConnections() int {
 	cp.mu.RLock()
 	defer cp.mu.RUnlock()

@@ -1,7 +1,9 @@
+// Package proxy provides SOCKS5 proxy server implementation with traffic tracking.
 package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// Server manages the SOCKS5 proxy server.
 type Server struct {
 	cfg       *config.Config
 	log       *zap.Logger
@@ -19,6 +22,7 @@ type Server struct {
 	listener  net.Listener
 }
 
+// NewServer creates a new SOCKS5 proxy server.
 func NewServer(cfg *config.Config, log *zap.Logger, collector *pipeline.Collector) *Server {
 	return &Server{
 		cfg:       cfg,
@@ -27,6 +31,7 @@ func NewServer(cfg *config.Config, log *zap.Logger, collector *pipeline.Collecto
 	}
 }
 
+// Start starts the SOCKS5 proxy server.
 func (s *Server) Start() error {
 	conf := &socks5.Config{
 		Resolver: &socks5.DNSResolver{},
@@ -41,7 +46,8 @@ func (s *Server) Start() error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Proxy.Address, s.cfg.Proxy.Port)
-	listener, err := net.Listen("tcp", addr)
+	lc := &net.ListenConfig{}
+	listener, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
@@ -51,8 +57,10 @@ func (s *Server) Start() error {
 
 	// Accept connections in a goroutine
 	go func() {
-		if err := socksServer.Serve(listener); err != nil && err != net.ErrClosed {
-			s.log.Error("SOCKS5 server error", zap.Error(err))
+		if err := socksServer.Serve(listener); err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				s.log.Error("SOCKS5 server error", zap.Error(err))
+			}
 		}
 	}()
 
@@ -72,6 +80,7 @@ func (s *Server) dialWithTracking(ctx context.Context, network, addr string) (ne
 
 	if err != nil {
 		s.log.Debug("dial failed", zap.String("addr", addr), zap.Error(err))
+
 		return nil, err
 	}
 
@@ -85,14 +94,16 @@ func (s *Server) dialWithTracking(ctx context.Context, network, addr string) (ne
 	}, nil
 }
 
+// Stop stops the SOCKS5 proxy server.
 func (s *Server) Stop() error {
 	if s.listener != nil {
 		return s.listener.Close()
 	}
+
 	return nil
 }
 
-// trackedConn wraps a net.Conn to track bytes read/written
+// trackedConn wraps a net.Conn to track bytes read/written.
 type trackedConn struct {
 	net.Conn
 	server    *Server
@@ -106,18 +117,20 @@ type trackedConn struct {
 func (tc *trackedConn) Read(p []byte) (n int, err error) {
 	n, err = tc.Conn.Read(p)
 	tc.bytesIn += int64(n)
+
 	return n, err
 }
 
 func (tc *trackedConn) Write(p []byte) (n int, err error) {
 	n, err = tc.Conn.Write(p)
 	tc.bytesOut += int64(n)
+
 	return n, err
 }
 
 func (tc *trackedConn) Close() error {
 	// Log the traffic event
-	remoteAddr := tc.Conn.RemoteAddr()
+	remoteAddr := tc.RemoteAddr()
 	var sourceIP string
 	if tcpAddr, ok := remoteAddr.(*net.TCPAddr); ok {
 		sourceIP = tcpAddr.IP.String()
@@ -149,6 +162,7 @@ func parseAddress(addr string) (string, int) {
 	}
 
 	port := 0
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+
 	return host, port
 }

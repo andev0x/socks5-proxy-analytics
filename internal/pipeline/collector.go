@@ -1,3 +1,4 @@
+// Package pipeline provides traffic event collection, normalization, and publishing.
 package pipeline
 
 import (
@@ -6,6 +7,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// RawTrafficEvent represents an unprocessed traffic event from the proxy.
 type RawTrafficEvent struct {
 	SourceIP      string
 	DestinationIP string
@@ -18,11 +20,13 @@ type RawTrafficEvent struct {
 	Protocol      string
 }
 
+// Collector collects raw traffic events from the proxy.
 type Collector struct {
 	out chan RawTrafficEvent
 	log *zap.Logger
 }
 
+// NewCollector creates a new traffic event collector.
 func NewCollector(out chan RawTrafficEvent, log *zap.Logger) *Collector {
 	return &Collector{
 		out: out,
@@ -30,12 +34,14 @@ func NewCollector(out chan RawTrafficEvent, log *zap.Logger) *Collector {
 	}
 }
 
+// Collect adds a raw traffic event to the collection channel.
 func (c *Collector) Collect(event RawTrafficEvent) error {
 	select {
 	case c.out <- event:
 		return nil
 	default:
 		c.log.Warn("collector channel full, dropping event")
+
 		return nil
 	}
 }

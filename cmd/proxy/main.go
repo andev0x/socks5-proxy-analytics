@@ -1,3 +1,4 @@
+// Package main provides the SOCKS5 proxy server entry point.
 package main
 
 import (
@@ -16,6 +17,17 @@ import (
 )
 
 func main() {
+	cfg, zapLog := initializeApp()
+	repo := initializeDatabase(cfg, zapLog)
+	defer closeRepository(repo, zapLog)
+
+	collector, normalizer, publisher := initializePipeline(cfg, repo, zapLog)
+	proxyServer := initializeProxy(cfg, zapLog, collector)
+
+	waitForShutdown(zapLog, proxyServer, publisher, normalizer)
+}
+
+func initializeApp() (*config.Config, *zap.Logger) {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
@@ -27,20 +39,31 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)
 		os.Exit(1)
 	}
-	defer log.Sync()
+	defer func() {
+		_ = log.Sync()
+	}()
 
-	zapLog := log.GetZapLogger()
+	return cfg, log.GetZapLogger()
+}
 
-	// Initialize database
+func initializeDatabase(cfg *config.Config, zapLog *zap.Logger) storage.Repository {
 	db, err := storage.NewDatabase(cfg)
 	if err != nil {
 		zapLog.Fatal("Failed to initialize database", zap.Error(err))
 	}
 
-	repo := storage.NewPostgresRepository(db)
-	defer repo.Close()
+	return storage.NewPostgresRepository(db)
+}
 
-	// Initialize pipeline
+func closeRepository(repo storage.Repository, zapLog *zap.Logger) {
+	if err := repo.Close(); err != nil {
+		zapLog.Error("failed to close repository", zap.Error(err))
+	}
+}
+
+func initializePipeline(
+	cfg *config.Config, repo storage.Repository, zapLog *zap.Logger,
+) (*pipeline.Collector, *pipeline.Normalizer, *pipeline.Publisher) {
 	collectorChan := make(chan pipeline.RawTrafficEvent, cfg.Pipeline.BufferSize)
 	normalizerOutputChan := make(chan *models.TrafficLog, cfg.Pipeline.BufferSize)
 
@@ -57,7 +80,12 @@ func main() {
 	)
 	publisher.Start()
 
-	// Initialize proxy server
+	return collector, normalizer, publisher
+}
+
+func initializeProxy(
+	cfg *config.Config, zapLog *zap.Logger, collector *pipeline.Collector,
+) *proxy.Server {
 	proxyServer := proxy.NewServer(cfg, zapLog, collector)
 	if err := proxyServer.Start(); err != nil {
 		zapLog.Fatal("Failed to start proxy server", zap.Error(err))
@@ -65,7 +93,13 @@ func main() {
 
 	zapLog.Info("SOCKS5 Proxy Analytics started successfully")
 
-	// Setup graceful shutdown
+	return proxyServer
+}
+
+func waitForShutdown(
+	zapLog *zap.Logger, proxyServer *proxy.Server,
+	publisher *pipeline.Publisher, normalizer *pipeline.Normalizer,
+) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -78,7 +112,6 @@ func main() {
 
 	publisher.Stop()
 	normalizer.Close()
-	close(collectorChan)
 
 	zapLog.Info("Shutdown complete")
 }

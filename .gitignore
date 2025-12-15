@@ -3,8 +3,7 @@
 *.dll
 *.so
 *.dylib
-proxy
-api
+/bin/
 
 # Test binary, build directory, and coverage files
 *.test

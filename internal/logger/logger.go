@@ -1,3 +1,4 @@
+// Package logger provides structured logging functionality.
 package logger
 
 import (
@@ -7,15 +8,17 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// Logger wraps zap.Logger with additional formatting methods.
 type Logger struct {
 	*zap.Logger
 }
 
-// GetZapLogger returns the underlying zap.Logger
+// GetZapLogger returns the underlying zap.Logger.
 func (l *Logger) GetZapLogger() *zap.Logger {
 	return l.Logger
 }
 
+// New creates a new logger with the specified log level.
 func New(level string) (*Logger, error) {
 	var config zap.Config
 
@@ -50,22 +53,27 @@ func New(level string) (*Logger, error) {
 	return &Logger{logger}, nil
 }
 
+// Fatal logs a fatal error and exits the application.
 func (l *Logger) Fatal(msg string, fields ...zap.Field) {
 	l.Logger.Fatal(msg, fields...)
 }
 
+// Debugf logs a debug message with printf-style formatting.
 func (l *Logger) Debugf(format string, args ...interface{}) {
 	l.Debug(fmt.Sprintf(format, args...))
 }
 
+// Infof logs an info message with printf-style formatting.
 func (l *Logger) Infof(format string, args ...interface{}) {
 	l.Info(fmt.Sprintf(format, args...))
 }
 
+// Warnf logs a warning message with printf-style formatting.
 func (l *Logger) Warnf(format string, args ...interface{}) {
 	l.Warn(fmt.Sprintf(format, args...))
 }
 
+// Errorf logs an error message with printf-style formatting.
 func (l *Logger) Errorf(format string, args ...interface{}) {
 	l.Error(fmt.Sprintf(format, args...))
 }

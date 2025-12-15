@@ -5,12 +5,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// Normalizer processes raw traffic events and converts them to traffic logs.
 type Normalizer struct {
 	in  chan RawTrafficEvent
 	out chan *models.TrafficLog
 	log *zap.Logger
 }
 
+// NewNormalizer creates a new traffic event normalizer.
 func NewNormalizer(in chan RawTrafficEvent, out chan *models.TrafficLog, log *zap.Logger) *Normalizer {
 	return &Normalizer{
 		in:  in,
@@ -19,6 +21,7 @@ func NewNormalizer(in chan RawTrafficEvent, out chan *models.TrafficLog, log *za
 	}
 }
 
+// Start begins processing events with the specified number of workers.
 func (n *Normalizer) Start(numWorkers int) {
 	for i := 0; i < numWorkers; i++ {
 		go n.process()
@@ -47,6 +50,7 @@ func (n *Normalizer) process() {
 	}
 }
 
+// Close closes the normalizer output channel.
 func (n *Normalizer) Close() {
 	close(n.out)
 }

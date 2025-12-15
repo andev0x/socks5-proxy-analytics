@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// Publisher batches traffic logs and publishes them to storage.
 type Publisher struct {
 	in          chan *models.TrafficLog
 	repo        storage.Repository
@@ -21,6 +22,7 @@ type Publisher struct {
 	cancel      context.CancelFunc
 }
 
+// NewPublisher creates a new traffic log publisher.
 func NewPublisher(
 	in chan *models.TrafficLog,
 	repo storage.Repository,
@@ -41,6 +43,7 @@ func NewPublisher(
 	}
 }
 
+// Start begins processing and publishing traffic logs.
 func (p *Publisher) Start() {
 	p.wg.Add(1)
 	go p.processBatch()
@@ -90,11 +93,13 @@ func (p *Publisher) flushBatch(batch []*models.TrafficLog) {
 	}
 }
 
+// Stop stops the publisher and waits for pending operations.
 func (p *Publisher) Stop() {
 	p.cancel()
 	p.wg.Wait()
 }
 
+// Close closes the publisher input channel and stops processing.
 func (p *Publisher) Close() {
 	close(p.in)
 	p.Stop()
