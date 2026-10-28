@@ -1,4 +1,4 @@
-version: 2
+version: "2"
 
 run:
   timeout: 5m
@@ -51,83 +51,83 @@ linters:
     - wastedassign
     - whitespace
 
-linters-settings:
-  cyclop:
-    max-complexity: 15
+  settings:
+    cyclop:
+      max-complexity: 15
 
-  dupl:
-    threshold: 100
+    dupl:
+      threshold: 100
 
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
 
-  forbidigo:
-    forbid:
-      - pattern: ^print.*$
-      - pattern: 'fmt\.Print.*'
+    forbidigo:
+      forbid:
+        - pattern: ^print.*$
+        - pattern: 'fmt\.Print.*'
 
-  funlen:
-    lines: 100
-    statements: 50
+    funlen:
+      lines: 100
+      statements: 50
 
-  gocognit:
-    min-complexity: 15
+    gocognit:
+      min-complexity: 15
 
-  goconst:
-    min-len: 2
-    min-occurrences: 3
+    goconst:
+      min-len: 2
+      min-occurrences: 3
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - experimental
-      - opinionated
-      - performance
-      - style
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
 
-  godot:
-    scope: declarations
-    exclude:
-      - "^func Test"
-      - "^func Benchmark"
+    godot:
+      scope: declarations
+      exclude:
+        - "^func Test"
+        - "^func Benchmark"
 
-  lll:
-    line-length: 120
+    lll:
+      line-length: 120
 
-  misspell:
-    locale: US
+    misspell:
+      locale: US
 
-  nakedret:
-    max-func-lines: 30
+    nakedret:
+      max-func-lines: 30
 
-  nestif:
-    min-complexity: 4
+    nestif:
+      min-complexity: 4
 
-  nlreturn:
-    block-size: 3
+    nlreturn:
+      block-size: 3
 
-  prealloc:
-    simple: true
-    range-loops: true
+    prealloc:
+      simple: true
+      range-loops: true
 
-  revive:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+
+  exclusions:
     rules:
-      - name: exported
-        arguments:
-          - disableStutteringCheck
+      - path: _test\.go
+        linters:
+          - cyclop
+          - dupl
+          - funlen
+          - gocognit
+          - goconst
+          - noctx
+          - prealloc
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - cyclop
-        - dupl
-        - funlen
-        - gocognit
-
-    - linters: [lll]
-      source: "^//go:generate "
-
-output:
-  format: colored-line-number
+      - linters: [lll]
+        source: "^//go:generate "

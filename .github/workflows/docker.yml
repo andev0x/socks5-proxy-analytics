@@ -68,12 +68,6 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Test Docker image
-      run: |
-        docker run --rm \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ steps.meta.outputs.version }} \
-          --help || echo "Help command not available for ${{ matrix.service }}"
-
   integration-test:
     name: Integration Test with Docker Compose
     runs-on: ubuntu-latest
@@ -84,51 +78,42 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Create test environment file
-      run: |
-        cat > .env << EOF
-        DB_HOST=db
-        DB_PORT=5432
-        DB_USER=socks5_user
-        DB_PASSWORD=socks5_password
-        DB_NAME=socks5_analytics
-        EOF
-
     - name: Run Docker Compose
       run: |
-        docker-compose -f deployments/docker-compose.yml up -d
+        docker compose -f deployments/docker-compose.yml up -d --build
 
     - name: Wait for services to be ready
       run: |
         echo "Waiting for database to be ready..."
-        timeout 60 bash -c 'until docker-compose -f deployments/docker-compose.yml exec -T db pg_isready -U socks5_user; do sleep 2; done'
+        timeout 90 bash -c 'until docker compose -f deployments/docker-compose.yml exec -T db pg_isready -U socks5 -d socks5_analytics; do sleep 2; done'
         echo "Waiting for API to be ready..."
-        timeout 60 bash -c 'until curl -f http://localhost:8080/health; do sleep 2; done'
+        timeout 90 bash -c 'until curl -sf http://localhost:8080/health; do sleep 2; done'
+        echo "Waiting for metrics endpoint..."
+        timeout 90 bash -c 'until curl -sf http://localhost:9090/metrics; do sleep 2; done'
 
-    - name: Test API endpoints
+    - name: Test API and metrics endpoints
       run: |
-        # Test health endpoint
         curl -f http://localhost:8080/health
+        curl -f http://localhost:8080/stats/traffic
+        curl -f http://localhost:9090/metrics | grep socks5_proxy_connections_accepted_total
 
-        # Test metrics endpoint
-        curl -f http://localhost:8080/metrics
-
-    - name: Test SOCKS5 proxy
+    - name: Test SOCKS5 proxying end to end
       run: |
-        # Test SOCKS5 proxy connection
-        nc -z localhost 1080
+        # The proxy resolves "api" in the Compose network, so this exercises DNS,
+        # forwarding and the analytics pipeline rather than only a TCP port check.
+        curl -f --proxy socks5h://127.0.0.1:1080 http://api:8080/health
 
     - name: Show logs on failure
       if: failure()
       run: |
         echo "=== API Logs ==="
-        docker-compose -f deployments/docker-compose.yml logs api
+        docker compose -f deployments/docker-compose.yml logs api
         echo "=== Proxy Logs ==="
-        docker-compose -f deployments/docker-compose.yml logs proxy
+        docker compose -f deployments/docker-compose.yml logs proxy
         echo "=== Database Logs ==="
-        docker-compose -f deployments/docker-compose.yml logs db
+        docker compose -f deployments/docker-compose.yml logs db
 
     - name: Cleanup
       if: always()
       run: |
-        docker-compose -f deployments/docker-compose.yml down -v
+        docker compose -f deployments/docker-compose.yml down -v

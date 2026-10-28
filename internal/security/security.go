@@ -1,15 +1,16 @@
-// Package security provides authentication, authorization, and rate limiting.
+// Package security provides authentication, client address rules and rate limiting for the proxy.
 package security
 
 import (
+	"crypto/subtle"
+	"errors"
 	"net"
+	"strings"
 	"sync"
 	"time"
-
-	"go.uber.org/zap"
 )
 
-// Authenticator handles SOCKS5 authentication.
+// Authenticator validates SOCKS5 username/password credentials (RFC 1929).
 type Authenticator struct {
 	username string
 	password string
@@ -25,13 +26,16 @@ func NewAuthenticator(username, password string) *Authenticator {
 	}
 }
 
-// Authenticate checks if the provided credentials are valid.
+// Authenticate checks the provided credentials using constant-time comparisons.
 func (a *Authenticator) Authenticate(username, password string) bool {
 	if !a.enabled {
 		return true
 	}
 
-	return username == a.username && password == a.password
+	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.username)) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.password)) == 1
+
+	return userMatch && passMatch
 }
 
 // IsEnabled returns whether authentication is enabled.
@@ -39,79 +43,141 @@ func (a *Authenticator) IsEnabled() bool {
 	return a.enabled
 }
 
-// IPWhitelist handles IP filtering.
+// IPWhitelist filters client IPs by exact IP or CIDR prefix.
 type IPWhitelist struct {
-	allowedIPs map[string]bool
+	allowedIPs map[string]struct{}
+	allowedNet []*net.IPNet
 	enabled    bool
 	mu         sync.RWMutex
 }
 
-// NewIPWhitelist creates a new IP whitelist from the given IP addresses.
-func NewIPWhitelist(ips []string) *IPWhitelist {
+// NewIPWhitelist creates a whitelist from IP addresses and CIDR ranges.
+// An invalid entry returns an error so misconfiguration never silently disables the rule.
+func NewIPWhitelist(entries []string) (*IPWhitelist, error) {
 	whitelist := &IPWhitelist{
-		allowedIPs: make(map[string]bool),
-		enabled:    len(ips) > 0,
+		allowedIPs: make(map[string]struct{}),
+		enabled:    len(entries) > 0,
 	}
 
-	for _, ip := range ips {
-		whitelist.allowedIPs[ip] = true
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, errors.New("empty IP whitelist entry")
+		}
+
+		if ip := net.ParseIP(entry); ip != nil {
+			whitelist.allowedIPs[ip.String()] = struct{}{}
+
+			continue
+		}
+
+		_, network, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, errors.New("IP whitelist entry must be an IP address or CIDR")
+		}
+
+		whitelist.allowedNet = append(whitelist.allowedNet, network)
 	}
 
-	return whitelist
+	return whitelist, nil
 }
 
-// IsAllowed checks if an IP address is allowed.
+// IsAllowed checks if an IP address is allowed. An empty whitelist allows all clients.
 func (w *IPWhitelist) IsAllowed(ip string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
 	if !w.enabled {
 		return true
 	}
 
-	w.mu.RLock()
-	defer w.mu.RUnlock()
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
 
-	return w.allowedIPs[ip]
+	if _, ok := w.allowedIPs[parsed.String()]; ok {
+		return true
+	}
+
+	for _, network := range w.allowedNet {
+		if network.Contains(parsed) {
+			return true
+		}
+	}
+
+	return false
 }
 
-// AddIP adds an IP address to the whitelist.
+// AddIP adds an exact IP address to the whitelist.
 func (w *IPWhitelist) AddIP(ip string) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.allowedIPs[ip] = true
+
+	w.allowedIPs[parsed.String()] = struct{}{}
+	w.enabled = true
 }
 
-// RemoveIP removes an IP address from the whitelist.
+// RemoveIP removes an exact IP address from the whitelist.
 func (w *IPWhitelist) RemoveIP(ip string) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.allowedIPs, ip)
+
+	delete(w.allowedIPs, parsed.String())
 }
 
-// RateLimiter implements token bucket rate limiting.
+// RateLimiter implements a bounded-memory, per-client token bucket rate limiter.
+// The unit is one new TCP connection per source IP.
 type RateLimiter struct {
 	requestsPerSecond int
 	buckets           map[string]*tokenBucket
-	mu                sync.RWMutex
+	maxClients        int
+	mu                sync.Mutex
 	enabled           bool
-	log               *zap.Logger
+	now               func() time.Time
 }
 
 type tokenBucket struct {
-	tokens    float64
-	lastTime  time.Time
-	ratePerMs float64
+	tokens   float64
+	lastTime time.Time
+	lastSeen time.Time
 }
 
-// NewRateLimiter creates a new rate limiter with token bucket algorithm.
-func NewRateLimiter(requestsPerSecond int, enabled bool, log *zap.Logger) *RateLimiter {
+// NewRateLimiter creates a rate limiter with the given per-client rate.
+func NewRateLimiter(requestsPerSecond int, enabled bool) *RateLimiter {
 	return &RateLimiter{
 		requestsPerSecond: requestsPerSecond,
 		buckets:           make(map[string]*tokenBucket),
+		maxClients:        100000,
 		enabled:           enabled,
-		log:               log,
+		now:               time.Now,
 	}
 }
 
-// Allow checks if a request from the identifier is allowed.
+// SetMaxClients bounds the number of tracked client buckets.
+func (rl *RateLimiter) SetMaxClients(maxClients int) {
+	if maxClients <= 0 {
+		return
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	rl.maxClients = maxClients
+	rl.evictLocked()
+}
+
+// Allow reports whether a new connection from the identifier is allowed.
 func (rl *RateLimiter) Allow(identifier string) bool {
 	if !rl.enabled {
 		return true
@@ -120,29 +186,31 @@ func (rl *RateLimiter) Allow(identifier string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	now := rl.now()
 	bucket, exists := rl.buckets[identifier]
-	now := time.Now()
 
 	if !exists {
-		bucket = &tokenBucket{
-			tokens:    float64(rl.requestsPerSecond),
-			lastTime:  now,
-			ratePerMs: float64(rl.requestsPerSecond) / 1000.0,
+		rl.evictLocked()
+		rl.buckets[identifier] = &tokenBucket{
+			tokens:   float64(rl.requestsPerSecond) - 1,
+			lastTime: now,
+			lastSeen: now,
 		}
-		rl.buckets[identifier] = bucket
 
 		return true
 	}
 
-	// Calculate tokens to add based on elapsed time
-	elapsed := now.Sub(bucket.lastTime).Milliseconds()
-	tokensToAdd := float64(elapsed) * bucket.ratePerMs
-	bucket.tokens = minFloat(float64(rl.requestsPerSecond), bucket.tokens+tokensToAdd)
-	bucket.lastTime = now
+	elapsed := now.Sub(bucket.lastTime).Seconds()
+	bucket.tokens += elapsed * float64(rl.requestsPerSecond)
+	if bucket.tokens > float64(rl.requestsPerSecond) {
+		bucket.tokens = float64(rl.requestsPerSecond)
+	}
 
-	// Check if we have at least one token
-	if bucket.tokens >= 1.0 {
-		bucket.tokens -= 1.0
+	bucket.lastTime = now
+	bucket.lastSeen = now
+
+	if bucket.tokens >= 1 {
+		bucket.tokens--
 
 		return true
 	}
@@ -150,20 +218,59 @@ func (rl *RateLimiter) Allow(identifier string) bool {
 	return false
 }
 
-// GetSourceIP extracts the source IP from a remote address.
-func (rl *RateLimiter) GetSourceIP(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
+// evictLocked removes idle buckets; callers must hold rl.mu.
+func (rl *RateLimiter) evictLocked() {
+	if len(rl.buckets) < rl.maxClients {
+		return
+	}
+
+	cutoff := rl.now().Add(-time.Minute)
+	for key, bucket := range rl.buckets {
+		if bucket.lastSeen.Before(cutoff) {
+			delete(rl.buckets, key)
+		}
+	}
+
+	// If every bucket is active, evict the least recently seen entry to keep memory bounded.
+	for len(rl.buckets) >= rl.maxClients {
+		var (
+			oldestKey  string
+			oldestTime time.Time
+		)
+
+		for key, bucket := range rl.buckets {
+			if oldestKey == "" || bucket.lastSeen.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = bucket.lastSeen
+			}
+		}
+
+		if oldestKey == "" {
+			return
+		}
+
+		delete(rl.buckets, oldestKey)
+	}
+}
+
+// TrackedClients returns the number of rate limiter buckets (for tests and diagnostics).
+func (rl *RateLimiter) TrackedClients() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	return len(rl.buckets)
+}
+
+// ClientIP extracts the IP from a host:port remote address.
+func ClientIP(remoteAddr net.Addr) string {
+	if remoteAddr == nil {
+		return ""
+	}
+
+	host, _, err := net.SplitHostPort(remoteAddr.String())
 	if err != nil {
-		return remoteAddr
+		return remoteAddr.String()
 	}
 
 	return host
-}
-
-func minFloat(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-
-	return b
 }

@@ -2,6 +2,10 @@
 ## Project: socks5-proxy-analytics
 ## Author: anvndev
 
+> Phase 1 implementation note: the current event schema, delivery contract and runtime
+> wiring are documented in [phase-1-implementation-plan.md](phase-1-implementation-plan.md)
+> and the README. Details below describe the original scope and may predate Phase 1.
+
 ## Project Goals
 
 To build a **SOCKS5 Proxy server** using **Golang** with the capability to:
@@ -39,7 +43,7 @@ To build a **SOCKS5 Proxy server** using **Golang** with the capability to:
 **Technologies used:**
 
 * `net` (Go standard library)
-* `github.com/armon/go-socks5`
+* In-repo SOCKS5 CONNECT handler (`internal/proxy`)
 * Goroutines / Channels
 * `context`
 

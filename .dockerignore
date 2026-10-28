@@ -1,0 +1,20 @@
+# Keep build context small and never ship local secrets/config into an image.
+.git
+.gitignore
+.github
+.ohgo
+.env
+.env.*
+configs/config.yml
+bin
+dist
+coverage.out
+coverage.html
+*.log
+.phase1-*
+docs
+README.md
+LICENSE
+deployments
+Makefile
+.golangci.yml

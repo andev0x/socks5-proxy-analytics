@@ -5,102 +5,150 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andev0x/socks5-proxy-analytics/internal/metrics"
 	"github.com/andev0x/socks5-proxy-analytics/internal/models"
 	"github.com/andev0x/socks5-proxy-analytics/internal/storage"
 	"go.uber.org/zap"
 )
 
-// Publisher batches traffic logs and publishes them to storage.
-type Publisher struct {
-	in          chan *models.TrafficLog
-	repo        storage.Repository
-	batchSize   int
-	flushTicker *time.Ticker
-	log         *zap.Logger
-	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
+// PublisherConfig holds bounded batching and retry behavior for analytics writes.
+type PublisherConfig struct {
+	BatchSize     int
+	FlushInterval time.Duration
+	MaxRetries    int
+	RetryBackoff  time.Duration
+	FlushTimeout  time.Duration
 }
 
-// NewPublisher creates a new traffic log publisher.
-func NewPublisher(
-	in chan *models.TrafficLog,
-	repo storage.Repository,
-	batchSize int,
-	flushIntervalMs int,
-	log *zap.Logger,
-) *Publisher {
-	ctx, cancel := context.WithCancel(context.Background())
+// Publisher batches normalized records and writes them to storage.
+//
+// Persistence is best-effort: batches are retried a bounded number of times with
+// exponential backoff. After exhaustion the batch is dropped and counted; it is never
+// reported as published. The final batch is flushed before the publisher exits.
+type Publisher struct {
+	in        <-chan *models.TrafficLog
+	repo      storage.Repository
+	cfg       PublisherConfig
+	m         *metrics.Metrics
+	log       *zap.Logger
+	done      chan struct{}
+	startOnce sync.Once
+}
 
+// NewPublisher creates a publisher. The input channel is closed by the normalizer.
+func NewPublisher(
+	in <-chan *models.TrafficLog, repo storage.Repository, cfg PublisherConfig, m *metrics.Metrics, log *zap.Logger,
+) *Publisher {
 	return &Publisher{
-		in:          in,
-		repo:        repo,
-		batchSize:   batchSize,
-		flushTicker: time.NewTicker(time.Duration(flushIntervalMs) * time.Millisecond),
-		log:         log,
-		ctx:         ctx,
-		cancel:      cancel,
+		in:   in,
+		repo: repo,
+		cfg:  cfg,
+		m:    m,
+		log:  log,
+		done: make(chan struct{}),
 	}
 }
 
-// Start begins processing and publishing traffic logs.
+// Start begins processing batches. Repeated calls are no-ops.
 func (p *Publisher) Start() {
-	p.wg.Add(1)
-	go p.processBatch()
+	p.startOnce.Do(func() {
+		go p.run()
+	})
 }
 
-func (p *Publisher) processBatch() {
-	defer p.wg.Done()
+// Done is closed after the input channel is drained and the final batch is flushed.
+func (p *Publisher) Done() <-chan struct{} {
+	return p.done
+}
 
-	batch := make([]*models.TrafficLog, 0, p.batchSize)
-	defer func() {
-		if len(batch) > 0 {
-			p.flushBatch(batch)
-		}
-		p.flushTicker.Stop()
-	}()
+func (p *Publisher) run() {
+	defer close(p.done)
+
+	ticker := time.NewTicker(p.cfg.FlushInterval)
+	defer ticker.Stop()
+
+	batch := make([]*models.TrafficLog, 0, p.cfg.BatchSize)
 
 	for {
 		select {
-		case <-p.ctx.Done():
-			return
-		case log := <-p.in:
-			if log == nil {
+		case record, ok := <-p.in:
+			if !ok {
+				p.flush(batch)
+
 				return
 			}
-			batch = append(batch, log)
-			if len(batch) >= p.batchSize {
-				p.flushBatch(batch)
-				batch = make([]*models.TrafficLog, 0, p.batchSize)
+
+			batch = append(batch, record)
+			p.m.QueueEvents.WithLabelValues(metrics.StageNormalizer).Set(float64(len(p.in)))
+
+			if len(batch) >= p.cfg.BatchSize {
+				p.flush(batch)
+				batch = make([]*models.TrafficLog, 0, p.cfg.BatchSize)
 			}
-		case <-p.flushTicker.C:
+		case <-ticker.C:
 			if len(batch) > 0 {
-				p.flushBatch(batch)
-				batch = make([]*models.TrafficLog, 0, p.batchSize)
+				p.flush(batch)
+				batch = make([]*models.TrafficLog, 0, p.cfg.BatchSize)
 			}
 		}
 	}
 }
 
-func (p *Publisher) flushBatch(batch []*models.TrafficLog) {
-	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
-	defer cancel()
-
-	if err := p.repo.SaveTrafficLogs(ctx, batch); err != nil {
-		p.log.Error("failed to save traffic logs", zap.Error(err), zap.Int("batch_size", len(batch)))
-	} else {
-		p.log.Debug("batch saved successfully", zap.Int("batch_size", len(batch)))
+func (p *Publisher) flush(batch []*models.TrafficLog) {
+	if len(batch) == 0 {
+		return
 	}
+
+	start := time.Now()
+	err := p.saveWithRetry(batch)
+
+	p.m.BatchSize.Observe(float64(len(batch)))
+	p.m.PublishDuration.Observe(time.Since(start).Seconds())
+
+	if err != nil {
+		p.m.PublishFailures.Inc()
+		p.m.DBErrors.Inc()
+		p.m.EventsPublishDropped.Add(float64(len(batch)))
+		p.log.Error("failed to persist analytics batch after retries; batch dropped",
+			zap.Int("batch_size", len(batch)),
+			zap.Error(err))
+
+		return
+	}
+
+	p.m.EventsPublished.Add(float64(len(batch)))
+	p.log.Debug("analytics batch persisted", zap.Int("batch_size", len(batch)))
 }
 
-// Stop stops the publisher and waits for pending operations.
-func (p *Publisher) Stop() {
-	p.cancel()
-	p.wg.Wait()
-}
+func (p *Publisher) saveWithRetry(batch []*models.TrafficLog) error {
+	var lastErr error
 
-// Close closes the publisher input channel and stops processing.
-func (p *Publisher) Close() {
-	close(p.in)
-	p.Stop()
+	for attempt := 0; attempt <= p.cfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			p.m.PublishRetries.Inc()
+
+			backoff := p.cfg.RetryBackoff * time.Duration(1<<(attempt-1))
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
+
+			time.Sleep(backoff)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), p.cfg.FlushTimeout)
+		lastErr = p.repo.SaveTrafficLogs(ctx, batch)
+		cancel()
+
+		if lastErr == nil {
+			return nil
+		}
+
+		p.log.Warn("analytics batch write failed",
+			zap.Int("attempt", attempt+1),
+			zap.Int("max_attempts", p.cfg.MaxRetries+1),
+			zap.Int("batch_size", len(batch)),
+			zap.Error(lastErr))
+	}
+
+	return lastErr
 }

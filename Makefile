@@ -1,4 +1,4 @@
-.PHONY: help build test clean lint docker docker-build docker-up docker-down install-tools fmt vet security release
+.PHONY: help build test test-race bench clean lint docker docker-build docker-up docker-down install-tools fmt vet security release
 
 # Variables
 BINARY_DIR=bin
@@ -11,6 +11,8 @@ help:
 	@echo "Available targets:"
 	@echo "  build         - Build binaries for proxy and API"
 	@echo "  test          - Run all tests"
+	@echo "  test-race     - Run all tests with the race detector"
+	@echo "  bench         - Run reproducible baseline benchmarks"
 	@echo "  test-verbose  - Run tests with verbose output"
 	@echo "  test-coverage - Run tests with coverage report"
 	@echo "  clean         - Clean build artifacts"
@@ -46,6 +48,14 @@ test-verbose:
 	@echo "Running tests with verbose output..."
 	@go test -v ./...
 
+test-race:
+	@echo "Running tests with race detector..."
+	@go test -race ./...
+
+bench:
+	@echo "Running baseline benchmarks..."
+	@go test -run '^$$' -bench . -benchmem -count=3 ./internal/proxy ./internal/pipeline
+
 test-coverage:
 	@echo "Running tests with coverage..."
 	@go test -v -race -coverprofile=coverage.out ./...
@@ -76,7 +86,7 @@ install-tools:
 	@echo "Installing development tools..."
 	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	@go install golang.org/x/tools/cmd/goimports@latest
-	@go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+	@go install github.com/securego/gosec/v2/cmd/gosec@latest
 	@go install golang.org/x/vuln/cmd/govulncheck@latest
 
 # Docker targets
@@ -87,15 +97,15 @@ docker-build:
 
 docker-up:
 	@echo "Starting services with Docker Compose..."
-	@docker-compose -f $(DOCKER_COMPOSE) up -d
+	@docker compose -f $(DOCKER_COMPOSE) up -d
 
 docker-down:
 	@echo "Stopping services with Docker Compose..."
-	@docker-compose -f $(DOCKER_COMPOSE) down
+	@docker compose -f $(DOCKER_COMPOSE) down
 
 docker-logs:
 	@echo "Showing Docker Compose logs..."
-	@docker-compose -f $(DOCKER_COMPOSE) logs -f
+	@docker compose -f $(DOCKER_COMPOSE) logs -f
 
 # Release target
 release:
@@ -126,7 +136,7 @@ clean:
 	@rm -rf $(BINARY_DIR)
 	@rm -rf dist
 	@rm -f coverage.out coverage.html
-	@docker-compose -f $(DOCKER_COMPOSE) down -v --remove-orphans 2>/dev/null || true
+	@docker compose -f $(DOCKER_COMPOSE) down -v --remove-orphans 2>/dev/null || true
 
 # Dependencies
 deps:

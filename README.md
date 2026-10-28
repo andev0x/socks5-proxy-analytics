@@ -1,434 +1,379 @@
-# SOCKS5 Proxy Analytics - Golang Project
+# SOCKS5 Proxy Analytics
 
-A complete SOCKS5 proxy server implementation in Golang with real-time traffic analysis, logging pipeline, RESTful API, and comprehensive monitoring.
+A Go SOCKS5 proxy with an asynchronous traffic-analytics pipeline, PostgreSQL storage, a
+Prometheus metrics endpoint and a small analytics API.
 
-## Project Features
+**Phase 1 status:** the Phase 1 network-observability foundation is implemented and tested,
+but this is **not production-ready**. See [Limitations](#limitations-and-non-goals) and
+[docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md).
 
-### Core Components
+- Architecture baseline: [docs/socks5-proxy-analytics-architecture.md](docs/socks5-proxy-analytics-architecture.md)
+- Phase 1 plan, decisions and evidence: [docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md)
+- Benchmarks and methodology: [docs/benchmarks.md](docs/benchmarks.md)
 
-1. **SOCKS5 Proxy Server**
-   - Full SOCKS5 protocol implementation using `go-socks5`
-   - Traffic logging hooks for every connection
-   - Connection lifecycle management
-   - Support for TCP connections with DNS resolution
+## What is implemented
 
-2. **Traffic Analysis Pipeline**
-   - **Collector**: Asynchronous event collection from proxy
-   - **Normalizer**: Data standardization with worker pool
-   - **Publisher**: Batch insert optimization to database
-   - Non-blocking design for high throughput
+| Area | Phase 1 behavior |
+| --- | --- |
+| SOCKS5 | RFC 1928 **CONNECT over TCP**; IPv4, IPv6 and domain address types |
+| Authentication | Optional RFC 1929 username/password, enforced in the handshake |
+| Client rules | Exact-IP/CIDR allowlist and per-source-IP new-connection rate limit |
+| Limits | `max_connections`, handshake timeout and upstream dial timeout are enforced |
+| Relay accounting | Explicit client→upstream and upstream→client byte counters |
+| Attribution | Client address, requested hostname and resolved destination IP stored separately |
+| Outcomes | Every admitted session produces one event, including dial, auth and handshake failure paths |
+| Metrics | Prometheus registry served on a real endpoint and updated by runtime paths |
+| Pipeline | Bounded best-effort queue, batching, bounded retries, visible loss |
+| Shutdown | Stop accept, bounded session grace, drain producers, flush final batch, close DB |
+| API | Destination/client aggregate queries, traffic logs, DB-backed health |
 
-3. **Data Storage**
-   - PostgreSQL integration with GORM ORM
-   - Optimized schema with btree indexing
-   - Automatic migrations on startup
-   - Batch insert operations for performance
+BIND and UDP ASSOCIATE are intentionally **not supported** and are rejected with a SOCKS5
+"command not supported" reply.
 
-4. **REST API**
-   - Gin framework for fast HTTP routing
-   - Dashboard endpoints for traffic analytics:
-     - `/stats/top-domains` - Top visited domains
-     - `/stats/source-ips` - Top source IPs
-     - `/stats/traffic` - Overall traffic statistics
-     - `/logs/traffic` - Traffic logs with time range filtering
-   - Pagination support with limit/offset
-   - Time-range filtering for analytics
-
-5. **Security Features**
-   - SOCKS5 authentication (username/password)
-   - IP whitelist filtering
-   - Token bucket rate limiting
-   - Per-client rate limit isolation
-
-6. **Performance & Monitoring**
-   - Worker pool pattern for parallel processing
-   - Connection pooling with max connection limits
-   - Prometheus metrics exposure
-   - Structured logging with Zap
-   - Batch database operations
-
-7. **Deployment**
-   - Multi-stage Docker builds
-   - Docker Compose configuration
-   - Environment variable support
-
-## Project Structure
+## Architecture map
 
 ```
-.
-├── cmd/
-│   ├── proxy/
-│   │   └── main.go           # SOCKS5 proxy server entry point
-│   └── api/
-│       └── main.go           # REST API server entry point
-├── internal/
-│   ├── config/
-│   │   └── config.go         # Configuration management
-│   ├── logger/
-│   │   └── logger.go         # Structured logging
-│   ├── models/
-│   │   └── traffic.go        # Data models
-│   ├── pipeline/
-│   │   ├── collector.go      # Event collection
-│   │   ├── normalizer.go     # Data normalization
-│   │   ├── publisher.go      # Database publishing
-│   │   ├── pool.go           # Worker pool & connection pooling
-│   │   └── pipeline_test.go  # Pipeline tests
-│   ├── storage/
-│   │   ├── database.go       # Database initialization
-│   │   └── repository.go     # Data access layer
-│   ├── proxy/
-│   │   └── server.go         # SOCKS5 server implementation
-│   ├── api/
-│   │   └── handle.go         # API handlers
-│   ├── security/
-│   │   ├── security.go       # Authentication & rate limiting
-│   │   └── security_test.go  # Security tests
-│   └── metrics/
-│       └── metrics.go        # Prometheus metrics
-├── configs/
-│   └── config.yml            # Configuration file
-├── deployments/
-│   └── docker-compose.yml    # Docker Compose setup
-├── build/
-│   └── docker/
-│       ├── Dockerfile.api    # API Docker image
-│       └── Dockerfile.proxy  # Proxy Docker image
-├── go.mod                    # Go modules
-└── go.sum                    # Dependency lock file
+cmd/proxy                 proxy process: listener, metrics server, pipeline, DB
+cmd/api                   analytics API process: Gin HTTP server + repository
+internal/proxy            SOCKS5 handshake, auth, dial, relay, limits, lifecycle
+internal/security         authenticator, IP/CIDR allowlist, bounded rate limiter
+internal/pipeline         collector -> normalizer -> batch publisher -> storage
+internal/models           persisted traffic schema and aggregate result types
+internal/storage          PostgreSQL/GORM repository and schema migration
+internal/metrics          dedicated Prometheus registry and HTTP handler
+internal/handlers         analytics API handlers and input validation
+internal/config           validated configuration and environment overrides
 ```
 
-## Getting Started
+The proxy and API are separate processes. Both require PostgreSQL at startup. The proxy
+never performs database I/O on the forwarding path.
 
-### Prerequisites
+## Event semantics
 
-- Go 1.25.5+
-- PostgreSQL 15+
-- Docker & Docker Compose (for containerized deployment)
+Every admitted SOCKS5 session emits exactly one analytics event. Pre-handshake rejects
+(connection limit, rate limit, client allowlist) are counted in metrics/logs but have no
+destination and therefore do not fabricate an event.
 
-### Local Setup
+| Field | Meaning |
+| --- | --- |
+| `event_id` | Random correlation/deduplication identity (unique index) |
+| `client_ip`, `client_port` | Peer of the **SOCKS5 TCP connection** (never the upstream) |
+| `requested_host` | Hostname exactly as requested; empty for IP literals |
+| `destination_ip` | IP actually dialed, taken from the established upstream socket |
+| `destination_port` | Requested destination port |
+| `protocol` | `tcp` |
+| `outcome` | `connected`, `dial_failed`, `auth_failed`, `handshake_failed` |
+| `termination_reason` | `client_close`, `upstream_close`, `relay_error`, `server_shutdown`, `dial_error`, `auth_failed`, `no_acceptable_auth`, `malformed_request`, `unsupported_command`, `unsupported_address_type` |
+| `timestamp` | Session start (accept time) |
+| `duration_ms` | Accept-to-finish duration in milliseconds |
+| `dial_latency_ms` | Upstream TCP connect latency in milliseconds (may round to 0 locally) |
+| `bytes_client_to_upstream` | Application bytes read from client and written upstream |
+| `bytes_upstream_to_client` | Application bytes read downstream and written to client |
+| `schema_version` | Event schema version (`1`) |
 
-1. **Install dependencies**
+**Byte rule:** counters include only application payload relayed after the SOCKS5 success
+reply. Handshake, authentication and request bytes are excluded. Both directions are tested
+with controlled payloads.
+
+## Delivery guarantee (best-effort telemetry)
+
+Connection analytics are **best-effort telemetry, not a durable audit log**:
+
+- the queue is bounded by `PIPELINE_BUFFER_SIZE`;
+- enqueue is non-blocking; when full, the event is dropped and counted in
+  `pipeline_events_dropped_total{stage="collector"}`;
+- a batch is written atomically with a unique `event_id`; retries are bounded by
+  `PIPELINE_MAX_RETRIES` with exponential backoff;
+- after retries are exhausted the batch is dropped and counted in
+  `pipeline_publish_failures_total` and `pipeline_events_publish_dropped_total`; it is never
+  reported as published;
+- shutdown drains producers and flushes the final batch under
+  `PIPELINE_FLUSH_TIMEOUT_MS` and the overall `SHUTDOWN_TIMEOUT_MS`;
+- events accepted but not yet persisted when the process is killed are lost.
+
+PostgreSQL is a required startup dependency because schema migration and repository
+initialization happen at boot. A **runtime** database outage does not stop forwarding; it
+degrades analytics and becomes visible in metrics and logs.
+
+## Security controls
+
+- **Authentication:** when `PROXY_AUTH_ENABLED=true`, the server requires RFC 1929
+  username/password authentication. Empty credentials fail startup validation.
+- **Client allowlist:** `PROXY_IP_WHITELIST` accepts exact IPs and CIDR ranges. Invalid
+  entries fail startup; they are never silently ignored. Empty means allow all clients.
+- **Rate limit:** `RATE_LIMIT_ENABLED` limits new TCP connections per source IP with a token
+  bucket. The bucket map is bounded by `RATE_LIMIT_MAX_TRACKED_CLIENTS`.
+- **Connection limit:** `PROXY_MAX_CONNECTIONS` is enforced at accept time.
+- **Exposure:** proxy/API/metrics bind to `127.0.0.1` by default. Binding the proxy to a
+  non-loopback address with authentication disabled logs a warning. The API and metrics
+  endpoint have no authentication; keep them loopback or behind a trusted network boundary.
+- Credentials are never logged, stored in events or used as metric labels.
+- Prometheus labels are bounded enums only; hostnames, IPs and request IDs are not labels.
+
+## Quick start (local, clean checkout)
+
+Prerequisites: Go 1.26.0+, PostgreSQL 15+ (16+ recommended), and a database user.
+
 ```bash
-go mod download
+git clone <repo-url> socks5-proxy-analytics
+cd socks5-proxy-analytics
+
+cp .env.example .env
+# Edit .env: at minimum DB_USER, DB_PASSWORD and DB_NAME.
 ```
 
-2. **Configure the application**
+Create the database/user (example for a local PostgreSQL superuser):
 
-Edit `configs/config.yml`:
-```yaml
-proxy:
-  address: "0.0.0.0"
-  port: 1080
-api:
-  address: "0.0.0.0"
-  port: 8080
-database:
-  host: "localhost"
-  port: 5432
-  user: "admin"
-  password: "admin"
-  database: "socksdb"
-```
-
-Or use environment variables:
 ```bash
-export PROXY_ADDRESS=0.0.0.0
-export PROXY_PORT=1080
-export API_ADDRESS=0.0.0.0
-export API_PORT=8080
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_USER=admin
-export DB_PASSWORD=admin
-export DB_NAME=socksdb
-export LOG_LEVEL=info
+psql -d postgres -c "CREATE ROLE socks5 LOGIN PASSWORD 'socks5_local_dev_password';"
+psql -d postgres -c "CREATE DATABASE socks5_analytics OWNER socks5;"
 ```
 
-3. **Create the database**
+`configs/config.yml` is optional and gitignored. Start with environment variables only, or
+copy the example:
+
 ```bash
-psql -U postgres -c "CREATE DATABASE socksdb;"
+cp configs/config.example.yml configs/config.yml
 ```
 
-4. **Run the proxy server**
+Run the two processes in separate terminals:
+
 ```bash
-go run ./cmd/proxy/main.go
+go run ./cmd/proxy
+go run ./cmd/api
 ```
 
-5. **Run the API server (in another terminal)**
+The proxy listens on `127.0.0.1:1080`, metrics/health on `127.0.0.1:9090`, and the API on
+`127.0.0.1:8080`. The schema is migrated automatically at startup.
+
+### Verify a real request
+
 ```bash
-go run ./cmd/api/main.go
+curl --proxy socks5h://127.0.0.1:1080 http://example.com/
+curl -s http://127.0.0.1:9090/metrics | grep socks5_proxy_connections_accepted_total
+curl -s 'http://127.0.0.1:8080/logs/traffic?limit=5'
+curl -s 'http://127.0.0.1:8080/stats/top-destinations?limit=5'
 ```
 
-### Docker Deployment
+Wait up to `PIPELINE_FLUSH_INTERVAL_MS` before expecting the event in PostgreSQL/API.
 
-1. **Start services with Docker Compose**
+### Graceful shutdown
+
+Send `SIGTERM`/`SIGINT` to the proxy process. It stops accepting new connections, waits up
+to `PROXY_SHUTDOWN_GRACE_MS` for active sessions (then force-closes them), drains the
+pipeline, flushes pending batches, closes the metrics server and database, and logs
+`shutdown complete` with `clean=true|false`.
+
+## Docker Compose
+
+The Compose file uses development-only defaults and loopback port bindings:
+
 ```bash
-docker-compose -f deployments/docker-compose.yml up --build
+docker compose -f deployments/docker-compose.yml up --build
 ```
 
-This will start:
-- PostgreSQL database (port 5432)
-- SOCKS5 proxy server (port 1080)
-- REST API server (port 8080)
+Compose reads `.env` from the Compose project directory (the directory containing the
+Compose file) by default. To use the repository-root `.env`, pass
+`--env-file .env`; shell environment variables also override the defaults.
 
-2. **Test the proxy**
+Published ports: `127.0.0.1:1080` (SOCKS5), `127.0.0.1:8080` (API), `127.0.0.1:9090`
+(metrics). PostgreSQL is not published to the host. Override `DB_USER`, `DB_PASSWORD` and
+`DB_NAME` via `.env` or the shell for anything beyond local development. Verify:
+
 ```bash
-# Configure your client to use SOCKS5 proxy at localhost:1080
-curl -x socks5://localhost:1080 https://example.com
+curl --proxy socks5h://127.0.0.1:1080 http://api:8080/health
+curl -s http://127.0.0.1:9090/metrics | head
 ```
 
-3. **Query the API**
-```bash
-# Get top domains
-curl http://localhost:8080/stats/top-domains?limit=10
+The proxy container resolves `api` on the Compose network; `socks5h` makes the proxy perform
+DNS resolution, which exercises the domain-name path and analytics attribution.
 
-# Get traffic statistics
-curl http://localhost:8080/stats/traffic
+## Configuration reference
 
-# Get traffic logs
-curl http://localhost:8080/logs/traffic?limit=100
-```
+Environment variables override the YAML file. `CONFIG_FILE` selects an explicit YAML file;
+`CONFIG_PATH` selects a directory (default `./configs`). See
+[configs/config.example.yml](configs/config.example.yml) and [.env.example](.env.example).
 
-## Configuration
+### Proxy
 
-### Proxy Configuration
-- `proxy.address` - Proxy server bind address (default: `0.0.0.0`)
-- `proxy.port` - Proxy server port (default: `1080`)
-- `proxy.auth.enabled` - Enable SOCKS5 authentication (default: `false`)
-- `proxy.auth.username` - Username for authentication
-- `proxy.auth.password` - Password for authentication
-- `proxy.max_connections` - Max concurrent connections (default: `10000`)
-- `proxy.ip_whitelist` - List of allowed source IPs
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PROXY_ADDRESS` | `127.0.0.1` | Listen address |
+| `PROXY_PORT` | `1080` | Listen port |
+| `PROXY_MAX_CONNECTIONS` | `10000` | Maximum admitted concurrent sessions |
+| `PROXY_DIAL_TIMEOUT_MS` | `10000` | Upstream connect timeout |
+| `PROXY_HANDSHAKE_TIMEOUT_MS` | `10000` | SOCKS5 negotiation deadline |
+| `PROXY_SHUTDOWN_GRACE_MS` | `5000` | Active-session grace before force close |
+| `PROXY_AUTH_ENABLED` | `false` | Require RFC 1929 authentication |
+| `PROXY_AUTH_USERNAME` / `PROXY_AUTH_PASSWORD` | empty | Required when auth is enabled |
+| `PROXY_IP_WHITELIST` | empty | Comma-separated IPs/CIDRs; empty allows all |
+| `RATE_LIMIT_ENABLED` | `false` | Enable per-source-IP connection rate limit |
+| `RATE_LIMIT_RPS` | `100` | New connections per second per source IP |
+| `RATE_LIMIT_MAX_TRACKED_CLIENTS` | `100000` | Bound on rate-limiter state |
 
-### API Configuration
-- `api.address` - API server bind address (default: `0.0.0.0`)
-- `api.port` - API server port (default: `8080`)
+### Metrics / API
 
-### Database Configuration
-- `database.host` - PostgreSQL host (default: `localhost`)
-- `database.port` - PostgreSQL port (default: `5432`)
-- `database.user` - Database user (default: `postgres`)
-- `database.password` - Database password
-- `database.database` - Database name (default: `socksdb`)
-- `database.sslmode` - SSL mode (default: `disable`)
+| Variable | Default | Description |
+| --- | --- | --- |
+| `METRICS_ENABLED` | `true` | Serve `/metrics` and `/healthz` |
+| `METRICS_ADDRESS` / `METRICS_PORT` | `127.0.0.1` / `9090` | Metrics listener |
+| `API_ADDRESS` / `API_PORT` | `127.0.0.1` / `8080` | Analytics API listener |
+| `API_READ_TIMEOUT_MS` / `API_WRITE_TIMEOUT_MS` / `API_IDLE_TIMEOUT_MS` | `10000` / `10000` / `60000` | HTTP timeouts |
 
-### Pipeline Configuration
-- `pipeline.workers` - Number of normalizer workers (default: `4`)
-- `pipeline.buffer_size` - Channel buffer size (default: `10000`)
-- `pipeline.batch_size` - Database batch size (default: `100`)
-- `pipeline.flush_interval_ms` - Batch flush interval in ms (default: `5000`)
+### Database
 
-### Logging Configuration
-- `logging.level` - Log level: `debug`, `info`, `warn`, `error` (default: `info`)
-- `logging.format` - Log format: `json` or text (default: `json`)
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DB_HOST` | required | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USER` | required | Database user |
+| `DB_PASSWORD` | required | Database password |
+| `DB_NAME` | required | Database name |
+| `DB_SSLMODE` | `disable` | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` |
+| `DB_CONNECT_TIMEOUT_MS` | `5000` | Startup ping/migration timeout |
+| `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` | `20` / `10` | Connection pool bounds |
 
-### Rate Limiting Configuration
-- `rate_limit.enabled` - Enable rate limiting (default: `false`)
-- `rate_limit.requests_per_second` - Rate limit threshold (default: `100`)
+### Pipeline / logging / shutdown
 
-## API Endpoints
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PIPELINE_WORKERS` | `4` | Normalizer workers |
+| `PIPELINE_BUFFER_SIZE` | `10000` | Bounded queue capacity per channel |
+| `PIPELINE_BATCH_SIZE` | `100` | Records per database batch |
+| `PIPELINE_FLUSH_INTERVAL_MS` | `5000` | Maximum batch age |
+| `PIPELINE_MAX_RETRIES` | `3` | Additional write attempts (total = retries + 1) |
+| `PIPELINE_RETRY_BACKOFF_MS` | `200` | Exponential backoff base |
+| `PIPELINE_FLUSH_TIMEOUT_MS` | `5000` | Per-attempt write timeout |
+| `SHUTDOWN_TIMEOUT_MS` | `15000` | Overall shutdown/flush deadline |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `json` | `json` or `text` |
 
-### Health Check
-```
-GET /health
-```
-Returns server health status.
+Invalid values, a missing required DB setting, enabled auth with empty credentials, or a
+malformed allowlist entry fail startup with an actionable error.
 
-### Top Domains
-```
-GET /stats/top-domains?limit=10
-```
-Returns the most accessed domains.
+## Metrics
 
-**Query Parameters:**
-- `limit` (optional): Number of results (default: 10)
+`GET http://127.0.0.1:9090/metrics` (Prometheus text format) and
+`GET /healthz` on the same listener. The API process does not serve proxy metrics.
 
-**Response:**
-```json
-[
-  {
-    "domain": "google.com",
-    "count": 1523,
-    "total_bytes_in": 5242880,
-    "total_bytes_out": 2621440,
-    "avg_latency_ms": 45.2
-  }
-]
-```
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `socks5_proxy_active_connections` | gauge | Admitted sessions currently active |
+| `socks5_proxy_connections_accepted_total` | counter | Sessions admitted by limits/rules |
+| `socks5_proxy_connections_rejected_total{reason}` | counter | Pre-handshake refusals (`max_connections`, `rate_limited`, `ip_not_allowed`, `shutting_down`) |
+| `socks5_proxy_auth_failures_total` | counter | Failed username/password attempts |
+| `socks5_proxy_handshake_failures_total{reason}` | counter | Handshake/request failures |
+| `socks5_proxy_dial_errors_total{reason}` | counter | Upstream dial failures (`dns`, `timeout`, `refused`, `network_unreachable`, `canceled`, `other`) |
+| `socks5_proxy_dial_latency_seconds` | histogram | Dial latency |
+| `socks5_proxy_connection_duration_seconds` | histogram | Session duration |
+| `socks5_proxy_relay_bytes_total{direction}` | counter | Payload bytes by direction |
+| `socks5_proxy_relay_errors_total` | counter | Relay copy errors |
+| `pipeline_events_collected_total` | counter | Events accepted into the queue |
+| `pipeline_events_dropped_total{stage}` | counter | Dropped events |
+| `pipeline_queue_events{stage}` | gauge | Current queue occupancy |
+| `pipeline_events_normalized_total` | counter | Events converted to records |
+| `pipeline_events_published_total` | counter | Records successfully persisted |
+| `pipeline_publish_failures_total` | counter | Batches lost after retries |
+| `pipeline_events_publish_dropped_total` | counter | Records lost after retries |
+| `pipeline_publish_retries_total` | counter | Batch write retries |
+| `pipeline_publish_duration_seconds` | histogram | Batch write duration |
+| `pipeline_batch_size` | histogram | Records per persisted batch |
+| `db_errors_total` | counter | Write errors observed by the publisher |
+| `process_shutdowns_total{result}` | counter | `clean` or `timeout` shutdown outcomes |
 
-### Top Source IPs
-```
-GET /stats/source-ips?limit=10
-```
-Returns the top source IPs.
+## Analytics API
 
-**Query Parameters:**
-- `limit` (optional): Number of results (default: 10)
+All routes are unauthenticated in Phase 1 and bind to loopback by default.
 
-### Traffic Statistics
-```
-GET /stats/traffic?start=2025-01-01T00:00:00Z&end=2025-01-02T00:00:00Z
-```
-Returns overall traffic statistics for a time range.
+| Route | Description |
+| --- | --- |
+| `GET /health` | `200` when PostgreSQL is reachable, `503` otherwise |
+| `GET /stats/top-destinations?limit=10` | Destinations: requested hostname, else resolved IP |
+| `GET /stats/top-domains?limit=10` | Legacy alias for top destinations |
+| `GET /stats/top-client-ips?limit=10` | Client IPs by connection count |
+| `GET /stats/source-ips?limit=10` | Legacy alias for top client IPs |
+| `GET /stats/traffic?start=&end=` | Aggregate bytes, connections, latency, duration |
+| `GET /logs/traffic?limit=100&offset=0&start=&end=` | Paginated records |
 
-**Query Parameters:**
-- `start` (optional): Start timestamp in RFC3339 format
-- `end` (optional): End timestamp in RFC3339 format
+`limit` is clamped to `1..1000`; `offset` must be non-negative. Timestamps use RFC3339.
+The default range is the last 24 hours; ranges longer than 90 days or `end < start` return
+`400`.
 
-**Response:**
+Example record:
+
 ```json
 {
-  "total_connections": 10000,
-  "total_bytes_in": 104857600,
-  "total_bytes_out": 52428800,
-  "avg_latency_ms": 50.5
+  "event_id": "171eb92567d9831ac1a0537b839c43b4",
+  "client_ip": "127.0.0.1",
+  "client_port": 61567,
+  "requested_host": "localhost",
+  "destination_ip": "127.0.0.1",
+  "destination_port": 18080,
+  "protocol": "tcp",
+  "outcome": "connected",
+  "termination_reason": "upstream_close",
+  "timestamp": "2026-10-29T00:13:31.371164+07:00",
+  "duration_ms": 4,
+  "dial_latency_ms": 0,
+  "bytes_client_to_upstream": 87,
+  "bytes_upstream_to_client": 195,
+  "schema_version": 1
 }
 ```
 
-### Traffic Logs
-```
-GET /logs/traffic?limit=100&offset=0&start=2025-01-01T00:00:00Z&end=2025-01-02T00:00:00Z
-```
-Returns traffic logs with pagination and filtering.
+## Testing and benchmarks
 
-**Query Parameters:**
-- `limit` (optional): Number of results per page (default: 100)
-- `offset` (optional): Pagination offset (default: 0)
-- `start` (optional): Start timestamp in RFC3339 format
-- `end` (optional): End timestamp in RFC3339 format
-
-**Response:**
-```json
-[
-  {
-    "id": 1,
-    "source_ip": "192.168.1.1",
-    "destination_ip": "8.8.8.8",
-    "domain": "google.com",
-    "port": 443,
-    "timestamp": "2025-01-01T12:00:00Z",
-    "latency_ms": 45,
-    "bytes_in": 1024,
-    "bytes_out": 512,
-    "protocol": "tcp",
-    "created_at": "2025-01-01T12:00:01Z"
-  }
-]
-```
-
-## Monitoring
-
-### Prometheus Metrics
-
-Metrics are exposed at `http://localhost:9090/metrics` (configurable).
-
-Available metrics:
-- `socks5_proxy_active_connections` - Current active proxy connections
-- `socks5_proxy_total_connections` - Total connections since start
-- `socks5_proxy_closed_connections` - Total closed connections
-- `socks5_proxy_bytes_in_total` - Total bytes received
-- `socks5_proxy_bytes_out_total` - Total bytes sent
-- `socks5_proxy_latency_ms` - Connection latency distribution
-- `pipeline_events_collected_total` - Events collected
-- `pipeline_events_processed_total` - Events processed
-- `pipeline_events_published_total` - Events published to DB
-- `pipeline_processing_latency_ms` - Pipeline processing latency
-- `db_query_duration_ms` - Database query duration
-- `db_errors_total` - Database errors
-
-## Testing
-
-### Run All Tests
 ```bash
+gofmt -l .                 # expect no output
+go build ./...
+go vet ./...
 go test ./...
+go test -race ./...
+golangci-lint run ./...
+govulncheck ./...
+gosec ./...
 ```
 
-### Run Specific Tests
+The PostgreSQL integration test is skipped unless `TEST_DB_HOST` is set; a skipped test is
+not a pass:
+
 ```bash
-# Pipeline tests
-go test -v ./internal/pipeline
-
-# Security tests
-go test -v ./internal/security
+TEST_DB_HOST=localhost TEST_DB_PORT=5432 TEST_DB_USER=socks5 \
+TEST_DB_PASSWORD=change_me TEST_DB_NAME=socks5_analytics_test \
+go test -v ./internal/storage
 ```
 
-### Test Coverage
+Reproducible baseline benchmarks:
+
 ```bash
-go test -cover ./...
+go test -run '^$' -bench . -benchmem -count=3 ./internal/proxy ./internal/pipeline
 ```
 
-## Performance Optimizations
+Methodology, environment and measured results are in [docs/benchmarks.md](docs/benchmarks.md).
 
-1. **Batch Insert Operations**
-   - Database publisher batches 100 records before inserting
-   - Configurable flush interval (default 5 seconds)
-   - Reduces database load and increases throughput
+## Schema and upgrade note
 
-2. **Worker Pool**
-   - Normalizer uses 4 worker goroutines by default
-   - Configurable worker count
-   - Prevents unbounded goroutine creation
+Phase 1 replaced ambiguous legacy columns with explicit fields (`client_ip`,
+`requested_host`, `bytes_client_to_upstream`, `bytes_upstream_to_client`, `outcome`,
+`termination_reason`, `schema_version`). `AutoMigrate` adds the new columns but does not
+drop old ones. Legacy rows keep their old values and should be treated as schema version 0;
+historical `source_ip` values may have contained the upstream address. There is no
+versioned migration tool or retention policy yet.
 
-3. **Connection Pooling**
-   - Max connection limits to prevent resource exhaustion
-   - Active connection tracking
-   - Graceful connection rejection when limit reached
+## Limitations and non-goals
 
-4. **Buffered Channels**
-   - Pipeline uses buffered channels for asynchronous processing
-   - Configurable buffer sizes
-   - Prevents blocking on event collection
+- Best-effort analytics: no durable replay, no retention policy, no audit guarantee.
+- TCP CONNECT only; BIND/UDP ASSOCIATE rejected.
+- No idle-session timeout; long-lived sessions occupy connection slots.
+- No Phase 2 workload identity or destination policy engine.
+- API and metrics endpoints are unauthenticated; loopback defaults are the Phase 1 boundary.
+- `AutoMigrate` remains the schema mechanism.
+- Docker image build/runtime was not executed in the environment used to produce this
+  change (Docker daemon unavailable); Compose was validated statically and the equivalent
+  local runtime path was exercised.
+- Not production-ready: no threat-model review, retention policy, rate limit on the API, or
+  multi-instance durability.
 
-5. **Database Indexing**
-   - B-tree indexes on frequently queried columns
-   - Timestamp, source IP, and domain indexed
-   - Query optimization for analytics
+## License
 
-## Security Features
-
-1. **Authentication**
-   - Optional SOCKS5 username/password authentication
-   - Configurable credentials
-
-2. **IP Whitelisting**
-   - Optional source IP filtering
-   - Dynamic IP management (add/remove at runtime)
-
-3. **Rate Limiting**
-   - Token bucket rate limiting algorithm
-   - Per-client rate limit isolation
-   - Configurable requests per second
-
-## Logging
-
-Structured logging with Zap provides:
-- JSON log format for easy parsing
-- Configurable log levels
-- Contextual error information
-- Performance tracking
-
-## Technologies Used
-
-### Core
-- **Go 1.25.5** - Language
-- **GORM v1.31.1** - ORM
-- **PostgreSQL** - Database
-
-### Frameworks & Libraries
-- **github.com/armon/go-socks5** - SOCKS5 protocol
-- **github.com/gin-gonic/gin** - Web framework
-- **github.com/spf13/viper** - Configuration management
-- **go.uber.org/zap** - Structured logging
-- **github.com/prometheus/client_golang** - Metrics
-
-### Infrastructure
-- **Docker** - Containerization
-- **Docker Compose** - Orchestration
-
-## [License](LICENSE)
-
-> This project is provided as-is for educational and professional purposes.
-
-## [Author](github.com/andev0x)
-
+Provided as-is for educational and professional purposes. See [LICENSE](LICENSE).

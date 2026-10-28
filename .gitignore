@@ -53,3 +53,6 @@ coverage.out
 # Temporary files (Generic)
 *.tmp
 *.temp
+
+# ohgo runtime state
+.ohgo/

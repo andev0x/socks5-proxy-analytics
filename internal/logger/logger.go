@@ -18,32 +18,31 @@ func (l *Logger) GetZapLogger() *zap.Logger {
 	return l.Logger
 }
 
-// New creates a new logger with the specified log level.
-func New(level string) (*Logger, error) {
-	var config zap.Config
-
-	switch level {
-	case "debug":
-		config = zap.NewDevelopmentConfig()
-		config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
-	case "info":
-		config = zap.NewProductionConfig()
-		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	case "warn":
-		config = zap.NewProductionConfig()
-		config.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
-	case "error":
-		config = zap.NewProductionConfig()
-		config.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
-	default:
-		config = zap.NewProductionConfig()
-		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	}
-
+// New creates a logger with the specified level and encoding (json or text).
+func New(level, format string) (*Logger, error) {
+	config := zap.NewProductionConfig()
 	config.OutputPaths = []string{"stdout"}
 	config.ErrorOutputPaths = []string{"stderr"}
 	config.EncoderConfig.TimeKey = "timestamp"
 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	switch level {
+	case "debug":
+		config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	case "info":
+		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	case "warn":
+		config.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
+	case "error":
+		config.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	default:
+		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	}
+
+	if format == "text" {
+		config.Encoding = "console"
+		config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	}
 
 	logger, err := config.Build()
 	if err != nil {

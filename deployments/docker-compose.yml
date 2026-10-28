@@ -1,35 +1,72 @@
-
-version: '3.9'
+# Local development stack. Defaults are development-only credentials and all published
+# ports bind to loopback. For any shared environment, supply real secrets via .env or a
+# secret manager and review exposure before changing the host bindings.
+#
+# Usage:
+#   docker compose -f deployments/docker-compose.yml up --build
+#   curl --proxy socks5h://127.0.0.1:1080 http://api:8080/health
+#   curl http://127.0.0.1:9090/metrics
 
 services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
-      POSTGRES_DB: socksdb
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${DB_USER:-socks5}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-socks5_local_dev_password}
+      POSTGRES_DB: ${DB_NAME:-socks5_analytics}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
 
   api:
     build:
-      context: ../../
+      context: ..
       dockerfile: build/docker/Dockerfile.api
+    environment:
+      API_ADDRESS: 0.0.0.0
+      API_PORT: "8080"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-socks5}
+      DB_PASSWORD: ${DB_PASSWORD:-socks5_local_dev_password}
+      DB_NAME: ${DB_NAME:-socks5_analytics}
+      DB_SSLMODE: disable
+      LOG_LEVEL: info
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    restart: unless-stopped
 
   proxy:
     build:
-      context: ../../
+      context: ..
       dockerfile: build/docker/Dockerfile.proxy
+    environment:
+      PROXY_ADDRESS: 0.0.0.0
+      PROXY_PORT: "1080"
+      METRICS_ADDRESS: 0.0.0.0
+      METRICS_PORT: "9090"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-socks5}
+      DB_PASSWORD: ${DB_PASSWORD:-socks5_local_dev_password}
+      DB_NAME: ${DB_NAME:-socks5_analytics}
+      DB_SSLMODE: disable
+      LOG_LEVEL: info
     ports:
-      - "1080:1080"
+      - "127.0.0.1:1080:1080"
+      - "127.0.0.1:9090:9090"
     depends_on:
-      - api
+      db:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:

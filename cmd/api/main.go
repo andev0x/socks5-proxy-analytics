@@ -1,11 +1,16 @@
-// Package main provides the API server entry point.
+// Package main provides the analytics API server entry point.
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/andev0x/socks5-proxy-analytics/internal/config"
 	"github.com/andev0x/socks5-proxy-analytics/internal/handlers"
@@ -22,7 +27,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log, err := logger.New(cfg.Logging.Level)
+	log, err := logger.New(cfg.Logging.Level, cfg.Logging.Format)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)
 		os.Exit(1)
@@ -33,51 +38,72 @@ func main() {
 
 	zapLog := log.GetZapLogger()
 
-	// Initialize database
-	db, err := storage.NewDatabase(cfg)
+	db, err := storage.NewDatabase(context.Background(), cfg)
 	if err != nil {
 		zapLog.Fatal("Failed to initialize database", zap.Error(err))
 	}
 
 	repo := storage.NewPostgresRepository(db)
-	defer func() {
-		if err := repo.Close(); err != nil {
-			zapLog.Error("failed to close repository", zap.Error(err))
+	server := buildHTTPServer(cfg, repo, zapLog)
+
+	address := net.JoinHostPort(cfg.API.Address, fmt.Sprintf("%d", cfg.API.Port))
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", address)
+	if err != nil {
+		zapLog.Fatal("Failed to listen on API address", zap.String("address", address), zap.Error(err))
+	}
+
+	go func() {
+		zapLog.Info("API server started", zap.String("address", address))
+		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			zapLog.Error("API server stopped unexpectedly", zap.Error(serveErr))
 		}
 	}()
 
-	// Setup Gin router
-	if cfg.Logging.Level == "info" || cfg.Logging.Level == "warn" {
+	waitForSignal(zapLog, server, repo)
+}
+
+func buildHTTPServer(cfg *config.Config, repo storage.Repository, log *zap.Logger) *http.Server {
+	if cfg.Logging.Level != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.Default()
+	handler := handlers.NewHandler(repo, log)
 
-	// Initialize handler
-	handler := handlers.NewHandler(repo, zapLog)
-
-	// Register routes
 	router.GET("/health", handler.Health)
-	router.GET("/stats/top-domains", handler.GetTopDomains)
-	router.GET("/stats/source-ips", handler.GetTopSourceIPs)
+	router.GET("/stats/top-destinations", handler.GetTopDestinations)
+	router.GET("/stats/top-domains", handler.GetTopDestinations)
+	router.GET("/stats/top-client-ips", handler.GetTopClientIPs)
+	router.GET("/stats/source-ips", handler.GetTopClientIPs)
 	router.GET("/stats/traffic", handler.GetTrafficStats)
 	router.GET("/logs/traffic", handler.GetTrafficLogs)
 
-	zapLog.Info("API server starting", zap.String("address", fmt.Sprintf("%s:%d", cfg.API.Address, cfg.API.Port)))
+	return &http.Server{
+		Handler:           router,
+		ReadHeaderTimeout: time.Duration(cfg.API.ReadTimeoutMs) * time.Millisecond,
+		ReadTimeout:       time.Duration(cfg.API.ReadTimeoutMs) * time.Millisecond,
+		WriteTimeout:      time.Duration(cfg.API.WriteTimeoutMs) * time.Millisecond,
+		IdleTimeout:       time.Duration(cfg.API.IdleTimeoutMs) * time.Millisecond,
+	}
+}
 
-	// Run server in a goroutine
-	go func() {
-		addr := fmt.Sprintf("%s:%d", cfg.API.Address, cfg.API.Port)
-		if err := router.Run(addr); err != nil {
-			zapLog.Error("failed to run API server", zap.Error(err))
-			os.Exit(1)
-		}
-	}()
-
-	// Setup graceful shutdown
+func waitForSignal(log *zap.Logger, server *http.Server, repo storage.Repository) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	<-sigChan
-	zapLog.Info("API server shutting down gracefully...")
+	sig := <-sigChan
+	log.Info("API shutdown signal received", zap.String("signal", sig.String()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Error("API server shutdown did not complete cleanly", zap.Error(err))
+	}
+
+	if err := repo.Close(); err != nil {
+		log.Error("failed to close repository", zap.Error(err))
+	}
+
+	log.Info("API shutdown complete")
 }

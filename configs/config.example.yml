@@ -1,0 +1,68 @@
+# Example configuration. Copy to configs/config.yml (gitignored) or provide values via
+# environment variables. Environment variables take precedence over this file.
+# Never commit real credentials.
+
+proxy:
+  # Loopback is the safe default. Use 0.0.0.0 only when network exposure is intended
+  # and authentication/client rules are configured.
+  address: "127.0.0.1"
+  port: 1080
+  max_connections: 10000
+  dial_timeout_ms: 10000
+  handshake_timeout_ms: 10000
+  shutdown_grace_ms: 5000
+  auth:
+    enabled: false
+    username: ""
+    password: ""
+  # Exact IPs and CIDR ranges. Empty means "allow all clients".
+  ip_whitelist: []
+
+api:
+  address: "127.0.0.1"
+  port: 8080
+  read_timeout_ms: 10000
+  write_timeout_ms: 10000
+  idle_timeout_ms: 60000
+
+metrics:
+  enabled: true
+  # Keep loopback unless the endpoint is protected by the network boundary.
+  address: "127.0.0.1"
+  port: 9090
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "socks5"
+  password: "socks5_local_dev_password"
+  database: "socks5_analytics"
+  sslmode: "disable"
+  connect_timeout_ms: 5000
+  max_open_conns: 20
+  max_idle_conns: 10
+
+pipeline:
+  workers: 4
+  # Bounded best-effort queue. Events are dropped (and counted) when full.
+  buffer_size: 10000
+  batch_size: 100
+  flush_interval_ms: 5000
+  # Total attempts = max_retries + 1. Exhausted batches are counted as dropped.
+  max_retries: 3
+  retry_backoff_ms: 200
+  flush_timeout_ms: 5000
+
+logging:
+  level: "info"
+  format: "json"
+
+rate_limit:
+  enabled: false
+  # Per source-IP new TCP connection rate.
+  requests_per_second: 100
+  max_tracked_clients: 100000
+
+# Overall shutdown deadline: stop accepting, grace for sessions, drain and flush.
+shutdown:
+  timeout_ms: 15000
