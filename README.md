@@ -254,7 +254,9 @@ malformed allowlist entry fail startup with an actionable error.
 ## Metrics
 
 `GET http://127.0.0.1:9090/metrics` (Prometheus text format) and
-`GET /healthz` on the same listener. The API process does not serve proxy metrics.
+`GET /healthz` on the same listener. `/healthz` reports proxy process liveness; it is not a
+database readiness check. The API process serves PostgreSQL-backed readiness at `GET /health`
+and does not serve proxy metrics.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
@@ -368,9 +370,10 @@ versioned migration tool or retention policy yet.
 - No Phase 2 workload identity or destination policy engine.
 - API and metrics endpoints are unauthenticated; loopback defaults are the Phase 1 boundary.
 - `AutoMigrate` remains the schema mechanism.
-- Docker image build/runtime was not executed in the environment used to produce this
-  change (Docker daemon unavailable); Compose was validated statically and the equivalent
-  local runtime path was exercised.
+- Docker Compose build/runtime was verified locally with Colima: images built, all services
+  became healthy, a `socks5h` request through the published proxy port reached the API
+  container, and the resulting event was persisted and returned by the analytics API.
+  Published host ports may need adjustment if 1080/8080/9090 are already in use.
 - Not production-ready: no threat-model review, retention policy, rate limit on the API, or
   multi-instance durability.
 

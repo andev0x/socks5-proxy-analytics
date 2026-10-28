@@ -171,6 +171,9 @@ compatibility change justified by security fixes; the local benchmark host used 
 | `go test -cover ./...` | config 79.7%, handlers 75.9%, logger 58.3%, metrics 96.1%, pipeline 93.0%, proxy 79.4%, security 90.7%; storage integration covered when env is set; `cmd/*` and models have no direct tests |
 | `golangci-lint run ./...` (v2.15.0, v2 config) | 0 issues |
 | PostgreSQL integration (`TEST_DB_*`, local PG 18.6) | pass: migrate, idempotent batch, destination/client/stats/logs queries, ping |
+| Full proxy→pipeline→PostgreSQL E2E (`TEST_DB_*`) | pass: persisted attribution, byte directions, outcome, queryable through repository |
+| Protocol regression suite | pass: IPv6 CONNECT, malformed/truncated/unsupported requests, auth truncation, client disconnect, concurrent attribution |
+| Docker Compose runtime (Colima) | pass: images built, services healthy, `socks5h` request reached API container, event persisted and returned by API |
 | `docker compose -f deployments/docker-compose.yml config` | pass; build context and loopback ports validated |
 | Docker image build/run | **blocked**: Docker daemon unavailable |
 | Runtime E2E | pass: `curl -x socks5h` fetched content via `localhost` domain; event persisted with `client_ip=127.0.0.1`, `requested_host=localhost`, `destination_ip=127.0.0.1`, bytes 87/198; API returned same record; `/metrics` counters moved; SIGTERM logged `clean=true` and exit 0 |
@@ -204,7 +207,7 @@ caveats: [`docs/benchmarks.md`](benchmarks.md).
 | Documented metrics endpoint reachable and reflects real activity | **pass** | metrics tests; runtime `/metrics` before/after |
 | Queue overload and persistence failure documented and tested | **pass** (best-effort contract) | collector/publisher tests; README |
 | Shutdown handles pending events per contract | **pass** (bounded) | pipeline flush test, active-session shutdown test |
-| Clean checkout builds/tests/runs from documented steps | **partial** | build/test/run verified locally; clean-clone and Docker runtime not re-run; DB/user provisioning required |
+| Clean checkout builds/tests/runs from documented steps | **pass (with provisioning caveat)** | build/test/run verified locally; PostgreSQL integration and full proxy→pipeline→PostgreSQL E2E pass with `TEST_DB_*`; Docker Compose build/runtime verified locally via Colima; DB/user provisioning is still required |
 | Benchmarks reproducible | **pass** | fixed command, env and results documented |
 
 ## 8. Known limitations and residual risks
@@ -212,10 +215,18 @@ caveats: [`docs/benchmarks.md`](benchmarks.md).
 - Best-effort analytics; no durable replay, retention policy, or audit guarantee.
 - TCP CONNECT only; BIND/UDP rejected. No idle/relay timeout.
 - `dial_latency_ms` is integer milliseconds and may be 0 on loopback; histograms use seconds.
+- `socks5_proxy_connection_duration_seconds` is now observed in `Server.finish` for every
+  admitted session, including auth, handshake, dial and relay failure paths.
+- Automated regression tests now cover IPv6 CONNECT, malformed/truncated/unsupported SOCKS5
+  requests, client disconnect, concurrent attribution and a full proxy→pipeline→PostgreSQL
+  path using `TEST_DB_*`.
 - API/metrics are unauthenticated; safety relies on loopback defaults/network boundary.
 - PostgreSQL is required at startup; runtime outage loses analytics after retries, by design.
 - `AutoMigrate` only; old columns/rows remain and historical attribution may be wrong.
-- Docker image build/run and full Compose integration were not executed (no daemon).
+- Docker Compose build/runtime was executed locally via Colima: all services became
+  healthy, a `socks5h` request reached the API container through the proxy, and the event
+  was persisted and returned by the analytics API. Host-port conflicts required temporary
+  remapping during verification; the committed Compose file keeps the documented ports.
 - No API rate limiting, no multi-instance durable delivery, no threat-model review;
   production readiness is not claimed.
 - Tests exclude `noctx`/`goconst`/`prealloc` in `_test.go` via lint config; production code is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -507,11 +508,17 @@ func listenerPort(tb testing.TB, listener net.Listener) int {
 
 func startTestUpstream(tb testing.TB, handler func(net.Conn)) *testUpstream {
 	tb.Helper()
+
+	return startTestUpstreamOn(tb, "127.0.0.1:0", handler)
+}
+
+func startTestUpstreamOn(tb testing.TB, address string, handler func(net.Conn)) *testUpstream {
+	tb.Helper()
 	t := tb
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		t.Fatalf("listen upstream: %v", err)
+		t.Fatalf("listen upstream %s: %v", address, err)
 	}
 
 	upstream := &testUpstream{
@@ -793,5 +800,362 @@ func TestPortFromString(t *testing.T) {
 
 	if got := portFromString("x"); got != 0 {
 		t.Errorf("portFromString invalid = %d", got)
+	}
+}
+
+func TestCONNECTIPv6PreservesAttribution(t *testing.T) {
+	upstream := startTestUpstreamOn(t, "[::1]:0", func(conn net.Conn) {
+		payload := make([]byte, 4)
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			return
+		}
+
+		_, _ = conn.Write([]byte("pong"))
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	sink := newTestSink()
+	server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+	conn, code := openSOCKS(t, server.Addr().String(), "::1", upstream.Port, nil)
+	if code != replySucceeded {
+		t.Fatalf("SOCKS reply = %d, want success", code)
+	}
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	response := make([]byte, len("pong"))
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	_ = conn.Close()
+	event := sink.wait(t)
+
+	if event.DestinationIP != "::1" {
+		t.Errorf("DestinationIP = %q, want ::1", event.DestinationIP)
+	}
+
+	if event.RequestedHost != "" {
+		t.Errorf("RequestedHost = %q, want empty for IP literal", event.RequestedHost)
+	}
+
+	if event.BytesClientToUpstream != int64(len("ping")) {
+		t.Errorf("bytes client->upstream = %d, want %d", event.BytesClientToUpstream, len("ping"))
+	}
+
+	if event.BytesUpstreamToClient != int64(len("pong")) {
+		t.Errorf("bytes upstream->client = %d, want %d", event.BytesUpstreamToClient, len("pong"))
+	}
+}
+
+func TestMalformedGreetingIsReported(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"truncated", []byte{socksVersion}},
+		{"bad_version", []byte{0x04, 0x01, 0x00}},
+		{"zero_methods", []byte{socksVersion, 0x00}},
+		{"truncated_methods", []byte{socksVersion, 0x02, 0x00}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+
+		t.Run(tc.name, func(t *testing.T) {
+			sink := newTestSink()
+			server, m := startTestProxy(t, testProxyConfig(), sink)
+
+			conn, err := net.DialTimeout("tcp", server.Addr().String(), 2*time.Second)
+			if err != nil {
+				t.Fatalf("dial proxy: %v", err)
+			}
+
+			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+			if _, err := conn.Write(tc.payload); err != nil {
+				t.Fatalf("write greeting: %v", err)
+			}
+
+			buf := make([]byte, 16)
+			_, _ = conn.Read(buf)
+			_ = conn.Close()
+
+			event := sink.wait(t)
+			if event.Outcome != pipeline.OutcomeHandshakeFailed {
+				t.Errorf("Outcome = %q, want handshake_failed", event.Outcome)
+			}
+
+			if event.TerminationReason != metrics.HandshakeMalformedGreeting {
+				t.Errorf("TerminationReason = %q, want %q", event.TerminationReason, metrics.HandshakeMalformedGreeting)
+			}
+
+			_ = m
+		})
+	}
+}
+
+func TestMalformedRequestVariants(t *testing.T) {
+	t.Run("truncated_request_header", func(t *testing.T) {
+		sink := newTestSink()
+		server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+		conn := greetNoAuth(t, server.Addr().String())
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Write([]byte{socksVersion, commandConnect, 0x00}); err != nil {
+			t.Fatalf("write partial request: %v", err)
+		}
+
+		buf := make([]byte, 16)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+
+		event := sink.wait(t)
+		if event.TerminationReason != pipeline.ReasonMalformedRequest {
+			t.Errorf("TerminationReason = %q, want malformed_request", event.TerminationReason)
+		}
+	})
+
+	t.Run("unsupported_command", func(t *testing.T) {
+		sink := newTestSink()
+		server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+		conn := greetNoAuth(t, server.Addr().String())
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		bindRequest := []byte{socksVersion, 0x02, 0x00, addressIPv4, 127, 0, 0, 1, 0, 80}
+		if _, err := conn.Write(bindRequest); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+
+		reply := make([]byte, 10)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _ = io.ReadFull(conn, reply[:4])
+		if reply[1] != replyCommandNotSupported {
+			t.Errorf("reply code = %d, want %d", reply[1], replyCommandNotSupported)
+		}
+
+		_ = conn.Close()
+		event := sink.wait(t)
+		if event.TerminationReason != pipeline.ReasonUnsupportedCommand {
+			t.Errorf("TerminationReason = %q, want unsupported_command", event.TerminationReason)
+		}
+	})
+
+	t.Run("unsupported_address_type", func(t *testing.T) {
+		sink := newTestSink()
+		server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+		conn := greetNoAuth(t, server.Addr().String())
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		request := []byte{socksVersion, commandConnect, 0x00, 0x02, 127, 0, 0, 1, 0, 80}
+		if _, err := conn.Write(request); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+
+		reply := make([]byte, 4)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := io.ReadFull(conn, reply); err != nil {
+			t.Fatalf("read reply: %v", err)
+		}
+		if reply[1] != replyAddressNotSupported {
+			t.Errorf("reply code = %d, want %d", reply[1], replyAddressNotSupported)
+		}
+
+		_ = conn.Close()
+		event := sink.wait(t)
+		if event.TerminationReason != pipeline.ReasonUnsupportedAddressType {
+			t.Errorf("TerminationReason = %q, want unsupported_address_type", event.TerminationReason)
+		}
+	})
+
+	t.Run("domain_length_zero", func(t *testing.T) {
+		sink := newTestSink()
+		server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+		conn := greetNoAuth(t, server.Addr().String())
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		request := []byte{socksVersion, commandConnect, 0x00, addressDomain, 0x00, 0x00, 0x50}
+		if _, err := conn.Write(request); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+
+		buf := make([]byte, 16)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+
+		event := sink.wait(t)
+		if event.TerminationReason != pipeline.ReasonMalformedRequest {
+			t.Errorf("TerminationReason = %q, want malformed_request", event.TerminationReason)
+		}
+	})
+
+	t.Run("port_zero", func(t *testing.T) {
+		sink := newTestSink()
+		server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+		conn := greetNoAuth(t, server.Addr().String())
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		request := []byte{socksVersion, commandConnect, 0x00, addressIPv4, 127, 0, 0, 1, 0, 0}
+		if _, err := conn.Write(request); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+
+		buf := make([]byte, 16)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+
+		event := sink.wait(t)
+		if event.TerminationReason != pipeline.ReasonMalformedRequest {
+			t.Errorf("TerminationReason = %q, want malformed_request", event.TerminationReason)
+		}
+	})
+}
+
+func TestTruncatedAuthIsReported(t *testing.T) {
+	cfg := testProxyConfig()
+	cfg.Proxy.Auth.Enabled = true
+	cfg.Proxy.Auth.Username = "client"
+	cfg.Proxy.Auth.Password = "secret"
+
+	sink := newTestSink()
+	server, _ := startTestProxy(t, cfg, sink)
+
+	conn, err := net.DialTimeout("tcp", server.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write([]byte{socksVersion, 0x01, methodUserPassword}); err != nil {
+		t.Fatalf("write greeting: %v", err)
+	}
+
+	methodReply := make([]byte, 2)
+	if _, err := io.ReadFull(conn, methodReply); err != nil {
+		t.Fatalf("read method reply: %v", err)
+	}
+
+	if _, err := conn.Write([]byte{authVersion, 0x06, 'c', 'l', 'i', 'e', 'n', 't'}); err != nil {
+		t.Fatalf("write partial auth: %v", err)
+	}
+
+	buf := make([]byte, 16)
+	_, _ = conn.Read(buf)
+	_ = conn.Close()
+
+	event := sink.wait(t)
+	if event.Outcome != pipeline.OutcomeAuthFailed && event.Outcome != pipeline.OutcomeHandshakeFailed {
+		t.Errorf("Outcome = %q, want auth/handshake failure", event.Outcome)
+	}
+}
+
+func TestClientDisconnectAfterConnect(t *testing.T) {
+	upstream := startTestUpstream(t, func(conn net.Conn) {
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	sink := newTestSink()
+	server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+	conn, code := openSOCKS(t, server.Addr().String(), "127.0.0.1", upstream.Port, nil)
+	if code != replySucceeded {
+		t.Fatalf("SOCKS reply = %d, want success", code)
+	}
+
+	_ = conn.Close()
+
+	event := sink.wait(t)
+	if event.TerminationReason != pipeline.ReasonClientClose &&
+		event.TerminationReason != pipeline.ReasonRelayError {
+		t.Errorf("TerminationReason = %q, want client_close or relay_error", event.TerminationReason)
+	}
+}
+
+func TestConcurrentAttribution(t *testing.T) {
+	upstream := startTestUpstream(t, func(conn net.Conn) {
+		header := make([]byte, 4)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			return
+		}
+
+		_, _ = conn.Write(append([]byte("ack-"), header...))
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	sink := newTestSink()
+	server, _ := startTestProxy(t, testProxyConfig(), sink)
+
+	const count = 20
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+
+		go func(index int) {
+			defer wg.Done()
+
+			conn, code := openSOCKS(t, server.Addr().String(), "127.0.0.1", upstream.Port, nil)
+			if code != replySucceeded {
+				t.Errorf("goroutine %d SOCKS reply = %d", index, code)
+
+				return
+			}
+
+			payload := []byte(fmt.Sprintf("p%03d", index))
+			if _, err := conn.Write(payload); err != nil {
+				t.Errorf("goroutine %d write: %v", index, err)
+
+				return
+			}
+
+			response := make([]byte, len("ack-")+len(payload))
+			if _, err := io.ReadFull(conn, response); err != nil {
+				t.Errorf("goroutine %d read: %v", index, err)
+
+				return
+			}
+
+			_ = conn.Close()
+		}(i)
+	}
+
+	wg.Wait()
+
+	events := make([]pipeline.ConnectionEvent, 0, count)
+	deadline := time.After(5 * time.Second)
+	for len(events) < count {
+		select {
+		case event := <-sink.events:
+			events = append(events, event)
+		case <-deadline:
+			t.Fatalf("collected %d/%d events", len(events), count)
+		}
+	}
+
+	if len(events) != count {
+		t.Fatalf("collected %d events, want %d", len(events), count)
+	}
+
+	ports := make(map[int]struct{}, count)
+	for _, event := range events {
+		if event.BytesClientToUpstream != 4 {
+			t.Errorf("event %s bytes client->upstream = %d, want 4", event.EventID, event.BytesClientToUpstream)
+		}
+
+		if event.BytesUpstreamToClient != 8 {
+			t.Errorf("event %s bytes upstream->client = %d, want 8", event.EventID, event.BytesUpstreamToClient)
+		}
+
+		if _, exists := ports[event.ClientPort]; exists {
+			t.Errorf("duplicate client port %d", event.ClientPort)
+		}
+
+		ports[event.ClientPort] = struct{}{}
 	}
 }

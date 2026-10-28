@@ -321,6 +321,7 @@ func (s *Server) finish(client net.Conn, sess *session) {
 
 	s.m.ActiveConnections.Set(float64(remaining))
 	sess.finish(time.Now().UTC())
+	s.m.ConnectionDuration.Observe(float64(sess.durationMs()) / 1000.0)
 
 	if sess.outcome == "" {
 		sess.outcome = pipeline.OutcomeConnected
