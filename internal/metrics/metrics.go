@@ -57,6 +57,9 @@ type Metrics struct {
 	RelayBytes          *prometheus.CounterVec
 	RelayErrors         prometheus.Counter
 
+	PolicyDecisions *prometheus.CounterVec
+	PolicyLatency   prometheus.Histogram
+
 	EventsCollected      prometheus.Counter
 	EventsDropped        *prometheus.CounterVec
 	QueueEvents          *prometheus.GaugeVec
@@ -134,6 +137,15 @@ func (m *Metrics) initializeTrafficMetrics() {
 	m.RelayErrors = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "socks5_proxy_relay_errors_total",
 		Help: "Relay copy errors after a successful upstream connection.",
+	})
+	m.PolicyDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "socks5_proxy_policy_decisions_total",
+		Help: "Egress policy decisions by bounded result.",
+	}, []string{labelResult})
+	m.PolicyLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "socks5_proxy_policy_evaluation_seconds",
+		Help:    "Egress policy evaluation latency in seconds.",
+		Buckets: prometheus.DefBuckets,
 	})
 }
 
@@ -225,6 +237,10 @@ func (m *Metrics) initializeLabelSeries() {
 	for _, result := range []string{ShutdownClean, ShutdownTimeout} {
 		m.Shutdowns.WithLabelValues(result)
 	}
+
+	for _, result := range []string{"allow", "deny"} {
+		m.PolicyDecisions.WithLabelValues(result)
+	}
 }
 
 func (m *Metrics) registerAllMetrics() error {
@@ -239,6 +255,8 @@ func (m *Metrics) registerAllMetrics() error {
 		m.ConnectionDuration,
 		m.RelayBytes,
 		m.RelayErrors,
+		m.PolicyDecisions,
+		m.PolicyLatency,
 		m.EventsCollected,
 		m.EventsDropped,
 		m.QueueEvents,

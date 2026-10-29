@@ -569,7 +569,7 @@ func startTestProxy(
 		t.Fatalf("NewMetrics() error = %v", err)
 	}
 
-	server, err := NewServer(cfg, zap.NewNop(), sink, m)
+	server, err := NewServer(cfg, zap.NewNop(), sink, m, nil)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}

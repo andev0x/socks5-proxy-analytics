@@ -26,6 +26,11 @@ type TrafficLog struct {
 	Protocol              string         `json:"protocol"`
 	Outcome               string         `gorm:"index" json:"outcome"`
 	TerminationReason     string         `json:"termination_reason"`
+	WorkloadID            string         `gorm:"column:workload_id;index" json:"workload_id"`
+	PolicyDecision        string         `gorm:"column:policy_decision" json:"policy_decision"`
+	PolicyReason          string         `gorm:"column:policy_reason" json:"policy_reason"`
+	PolicyID              string         `gorm:"column:policy_id" json:"policy_id"`
+	PolicyVersion         string         `gorm:"column:policy_version" json:"policy_version"`
 	Timestamp             time.Time      `gorm:"index" json:"timestamp"`
 	DurationMs            int64          `json:"duration_ms"`
 	DialLatencyMs         int64          `json:"dial_latency_ms"`

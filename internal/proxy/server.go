@@ -15,6 +15,7 @@ import (
 	"github.com/andev0x/socks5-proxy-analytics/internal/config"
 	"github.com/andev0x/socks5-proxy-analytics/internal/metrics"
 	"github.com/andev0x/socks5-proxy-analytics/internal/pipeline"
+	"github.com/andev0x/socks5-proxy-analytics/internal/policy"
 	"github.com/andev0x/socks5-proxy-analytics/internal/security"
 	"go.uber.org/zap"
 )
@@ -35,13 +36,14 @@ const (
 
 // Server owns the SOCKS5 listener, admitted sessions and their cleanup.
 type Server struct {
-	cfg       *config.Config
-	log       *zap.Logger
-	sink      EventSink
-	m         *metrics.Metrics
-	auth      *security.Authenticator
-	whitelist *security.IPWhitelist
-	limiter   *security.RateLimiter
+	cfg          *config.Config
+	log          *zap.Logger
+	sink         EventSink
+	m            *metrics.Metrics
+	auth         *security.Authenticator
+	whitelist    *security.IPWhitelist
+	limiter      *security.RateLimiter
+	policyEngine *policy.Engine
 
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -58,7 +60,7 @@ type Server struct {
 
 // NewServer creates a SOCKS5 server with validated security controls.
 func NewServer(
-	cfg *config.Config, log *zap.Logger, sink EventSink, m *metrics.Metrics,
+	cfg *config.Config, log *zap.Logger, sink EventSink, m *metrics.Metrics, policyEngine *policy.Engine,
 ) (*Server, error) {
 	if sink == nil || m == nil {
 		return nil, errors.New("proxy requires an event sink and metrics registry")
@@ -75,20 +77,25 @@ func NewServer(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	server := &Server{
-		ctx:        ctx,
-		cancel:     cancel,
-		cfg:        cfg,
-		log:        log,
-		sink:       sink,
-		m:          m,
-		whitelist:  whitelist,
-		limiter:    limiter,
-		conns:      make(map[net.Conn]struct{}),
-		acceptDone: make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
+		cfg:          cfg,
+		log:          log,
+		sink:         sink,
+		m:            m,
+		whitelist:    whitelist,
+		limiter:      limiter,
+		policyEngine: policyEngine,
+		conns:        make(map[net.Conn]struct{}),
+		acceptDone:   make(chan struct{}),
 	}
 
 	if cfg.Proxy.Auth.Enabled {
-		server.auth = security.NewAuthenticator(cfg.Proxy.Auth.Username, cfg.Proxy.Auth.Password)
+		if len(cfg.Proxy.Workloads) > 0 {
+			server.auth = security.NewAuthenticatorFromWorkloads(policy.WorkloadCredentialsFromConfig(cfg))
+		} else {
+			server.auth = security.NewAuthenticator(cfg.Proxy.Auth.Username, cfg.Proxy.Auth.Password)
+		}
 	}
 
 	return server, nil
@@ -226,10 +233,24 @@ func (s *Server) handle(client net.Conn, startedAt time.Time) {
 		return
 	}
 
+	sess.workloadID = req.workloadID
 	sess.requestedHost = req.requestedHost
 	sess.destinationPort = req.port
 
 	_ = client.SetDeadline(time.Time{})
+
+	// Policy enforcement before dialing.
+	if s.isPolicyEnabled() {
+		decisionAllowed, reason, resolvedHost, policyDecision := s.evaluatePolicy(req)
+		recordPolicyDecision(sess, &policyDecision, s.m)
+		if !decisionAllowed {
+			denyPolicyRequest(sess, client, reason, s.log)
+
+			return
+		}
+
+		req.dialHost = resolvedHost
+	}
 
 	upstream, dialLatency, err := s.dialUpstream(req)
 	sess.dialLatencyMs = dialLatency
@@ -264,7 +285,187 @@ func (s *Server) handle(client net.Conn, startedAt time.Time) {
 	}
 
 	sess.clientReader = clientReader
-	s.relay(client, upstream, sess)
+	s.relay(client, upstream, sess, time.Duration(s.cfg.Proxy.IdleTimeoutMs)*time.Millisecond)
+}
+
+// evaluatePolicy normalizes the destination, resolves DNS once for domains, and evaluates
+// policy. It returns whether the request is allowed, a reason, the host/IP to dial, and
+// the policy decision metadata.
+func (s *Server) evaluatePolicy(req *request) (allowed bool, reason, dialHost string, decision policy.Decision) {
+	start := time.Now()
+
+	host := req.requestedHost
+	ipLiteral := req.dialHost
+	if host != "" {
+		ipLiteral = ""
+	}
+
+	candidates, decision, ok := s.resolveCandidates(req, host, ipLiteral, start)
+	if !ok {
+		return false, decision.Reason, "", decision
+	}
+
+	chosen, lastDecision := s.chooseAllowed(candidates, req, host)
+	s.m.PolicyLatency.Observe(time.Since(start).Seconds())
+
+	if chosen == nil {
+		reason := normalizeDenyReason(lastDecision.Reason)
+		lastDecision.Reason = reason
+
+		return false, reason, "", lastDecision
+	}
+
+	chosenIP := chosen.String()
+	lastDecision.Allowed = true
+	lastDecision.IP = chosenIP
+	if lastDecision.Reason == "" {
+		lastDecision.Reason = "allowed"
+	}
+
+	return true, "allowed", chosenIP, lastDecision
+}
+
+func (s *Server) resolveCandidates(
+	req *request, host, ipLiteral string, start time.Time,
+) ([]net.IP, policy.Decision, bool) {
+	if host != "" {
+		resolver := &net.Resolver{}
+		lookupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			time.Duration(s.cfg.Proxy.DialTimeoutMs)*time.Millisecond,
+		)
+		defer cancel()
+
+		resolved, err := resolver.LookupIP(lookupCtx, "ip", host)
+		if err != nil {
+			decision := denyDecision(s.policyEngine, req, host, pipeline.ReasonDNSFailure)
+
+			s.m.PolicyLatency.Observe(time.Since(start).Seconds())
+
+			return nil, decision, false
+		}
+
+		if len(resolved) == 0 {
+			decision := denyDecision(s.policyEngine, req, host, pipeline.ReasonDNSFailure)
+			s.m.PolicyLatency.Observe(time.Since(start).Seconds())
+
+			return nil, decision, false
+		}
+
+		return resolved, policy.Decision{}, true
+	}
+
+	parsed := net.ParseIP(ipLiteral)
+	if parsed == nil {
+		decision := denyDecision(s.policyEngine, req, host, pipeline.ReasonDNSFailure)
+		s.m.PolicyLatency.Observe(time.Since(start).Seconds())
+
+		return nil, decision, false
+	}
+
+	return []net.IP{parsed}, policy.Decision{}, true
+}
+
+func (s *Server) chooseAllowed(candidates []net.IP, req *request, host string) (net.IP, policy.Decision) {
+	var chosen net.IP
+	var lastDecision policy.Decision
+
+	for _, candidate := range candidates {
+		evalReq := policy.Request{
+			Workload: req.workloadID,
+			Host:     host,
+			IP:       candidate.String(),
+			Port:     req.port,
+		}
+
+		decision := s.policyEngine.Evaluate(evalReq)
+		lastDecision = decision
+		if decision.Allowed {
+			chosen = candidate
+			lastDecision = decision
+
+			break
+		}
+	}
+
+	return chosen, lastDecision
+}
+
+func denyDecision(engine *policy.Engine, req *request, host, reason string) policy.Decision {
+	return policy.Decision{
+		Allowed:       false,
+		Reason:        reason,
+		PolicyID:      policyID(engine),
+		PolicyVersion: policyVersion(engine),
+		Workload:      req.workloadID,
+		Host:          host,
+		Port:          req.port,
+		Timestamp:     time.Now().UTC(),
+	}
+}
+
+func normalizeDenyReason(reason string) string {
+	if reason == "" {
+		return pipeline.ReasonPolicyDenied
+	}
+
+	if reason == "restricted_destination" {
+		return pipeline.ReasonRestrictedDestination
+	}
+
+	if reason == "missing_identity" {
+		return pipeline.ReasonPolicyDenied
+	}
+
+	return reason
+}
+
+func policyID(engine *policy.Engine) string {
+	if p := engine.Policy(); p != nil {
+		return p.ID
+	}
+
+	return "none"
+}
+
+func policyVersion(engine *policy.Engine) string {
+	if p := engine.Policy(); p != nil {
+		return p.Version
+	}
+
+	return "none"
+}
+
+func (s *Server) isPolicyEnabled() bool {
+	return s.policyEngine != nil && s.cfg.Policy.Enabled
+}
+
+func recordPolicyDecision(sess *session, decision *policy.Decision, m *metrics.Metrics) {
+	if decision.Allowed {
+		sess.policyDecision = "allow"
+	} else {
+		sess.policyDecision = "deny"
+	}
+
+	sess.policyReason = decision.Reason
+	sess.policyID = decision.PolicyID
+	sess.policyVersion = decision.PolicyVersion
+
+	if decision.Allowed {
+		m.PolicyDecisions.WithLabelValues("allow").Inc()
+	} else {
+		m.PolicyDecisions.WithLabelValues("deny").Inc()
+	}
+}
+
+func denyPolicyRequest(sess *session, client net.Conn, reason string, log *zap.Logger) {
+	sess.outcome = pipeline.OutcomePolicyDenied
+	sess.reason = reason
+	_ = writeReply(client, replyNotAllowed, nil)
+	log.Info("SOCKS5 policy denied",
+		zap.String("workload", sess.workloadID),
+		zap.String("host", sess.requestedHost),
+		zap.String("reason", reason))
 }
 
 func (s *Server) dialUpstream(req *request) (net.Conn, int64, error) {
