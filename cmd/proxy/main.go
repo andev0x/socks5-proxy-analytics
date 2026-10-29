@@ -16,6 +16,7 @@ import (
 	"github.com/andev0x/socks5-proxy-analytics/internal/logger"
 	"github.com/andev0x/socks5-proxy-analytics/internal/metrics"
 	"github.com/andev0x/socks5-proxy-analytics/internal/pipeline"
+	"github.com/andev0x/socks5-proxy-analytics/internal/policy"
 	"github.com/andev0x/socks5-proxy-analytics/internal/proxy"
 	"github.com/andev0x/socks5-proxy-analytics/internal/storage"
 	"go.uber.org/zap"
@@ -95,7 +96,20 @@ func buildApp(cfg *config.Config, log *zap.Logger) (*application, error) {
 	analytics := pipeline.NewPipeline(cfg, repo, appMetrics, log)
 	analytics.Start()
 
-	proxyServer, err := proxy.NewServer(cfg, log, analytics.Collector(), appMetrics)
+	policyEngine, err := policy.NewEngineFromConfig(cfg)
+	if err != nil {
+		shutdownPipelineAndRepo(cfg, analytics, repo, log)
+		shutdownMetricsServer(metricsServer, log)
+
+		return nil, fmt.Errorf("failed to load egress policy: %w", err)
+	}
+
+	authenticatorSetup := cfg.Proxy.Auth.Enabled
+	if authenticatorSetup && len(cfg.Proxy.Workloads) > 0 {
+		log.Info("workload identities configured", zap.Int("count", len(cfg.Proxy.Workloads)))
+	}
+
+	proxyServer, err := proxy.NewServer(cfg, log, analytics.Collector(), appMetrics, policyEngine)
 	if err != nil {
 		shutdownPipelineAndRepo(cfg, analytics, repo, log)
 		shutdownMetricsServer(metricsServer, log)

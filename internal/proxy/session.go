@@ -18,9 +18,15 @@ type session struct {
 	clientIP   string
 	clientPort int
 
+	workloadID      string
 	requestedHost   string
 	destinationIP   string
 	destinationPort int
+
+	policyDecision string
+	policyReason   string
+	policyID       string
+	policyVersion  string
 
 	dialLatencyMs int64
 	outcome       string
@@ -87,6 +93,11 @@ func (s *session) event() pipeline.ConnectionEvent {
 		Protocol:              "tcp",
 		Outcome:               s.outcome,
 		TerminationReason:     s.reason,
+		WorkloadID:            s.workloadID,
+		PolicyDecision:        s.policyDecision,
+		PolicyReason:          s.policyReason,
+		PolicyID:              s.policyID,
+		PolicyVersion:         s.policyVersion,
 		DialLatencyMs:         s.dialLatencyMs,
 		DurationMs:            s.durationMs(),
 		BytesClientToUpstream: s.bytesClientToUpstream.Load(),
@@ -99,15 +110,27 @@ type relayResult struct {
 	err       error
 }
 
-func (s *Server) relay(client, upstream net.Conn, sess *session) {
+func (s *Server) relay(client, upstream net.Conn, sess *session, idleTimeout time.Duration) {
 	results := make(chan relayResult, 2)
 	clientSource := io.Reader(client)
 	if sess.clientReader != nil {
 		clientSource = sess.clientReader
 	}
 
-	go relayCopy(upstream, clientSource, &sess.bytesClientToUpstream, s.m, metrics.DirectionClientToUpstream, results)
-	go relayCopy(client, upstream, &sess.bytesUpstreamToClient, s.m, metrics.DirectionUpstreamToClient, results)
+	if idleTimeout > 0 {
+		deadline := time.Now().Add(idleTimeout)
+		_ = client.SetDeadline(deadline)
+		_ = upstream.SetDeadline(deadline)
+	}
+
+	go relayCopy(
+		upstream, clientSource, &sess.bytesClientToUpstream, s.m,
+		metrics.DirectionClientToUpstream, results, client, upstream, idleTimeout,
+	)
+	go relayCopy(
+		client, upstream, &sess.bytesUpstreamToClient, s.m,
+		metrics.DirectionUpstreamToClient, results, client, upstream, idleTimeout,
+	)
 
 	first := <-results
 	if first.err != nil {
@@ -133,8 +156,24 @@ func relayCopy(
 	m *metrics.Metrics,
 	direction string,
 	results chan<- relayResult,
+	client, upstream net.Conn,
+	idleTimeout time.Duration,
 ) {
-	_, err := io.Copy(countingWriter{dst: dst, counter: counter, m: m, direction: direction}, readerOnly{reader: src})
+	touch := func() {
+		if idleTimeout <= 0 {
+			return
+		}
+		deadline := time.Now().Add(idleTimeout)
+		_ = client.SetDeadline(deadline)
+		_ = upstream.SetDeadline(deadline)
+	}
+
+	touch()
+
+	_, err := io.Copy(
+		countingWriter{dst: dst, counter: counter, m: m, direction: direction, touch: touch},
+		readerOnly{reader: src, touch: touch},
+	)
 
 	if closeWriter, ok := dst.(interface{ CloseWrite() error }); ok {
 		_ = closeWriter.CloseWrite()
@@ -164,9 +203,14 @@ type countingWriter struct {
 	counter   *atomic.Int64
 	m         *metrics.Metrics
 	direction string
+	touch     func()
 }
 
 func (w countingWriter) Write(p []byte) (int, error) {
+	if w.touch != nil {
+		w.touch()
+	}
+
 	n, err := w.dst.Write(p)
 	if n > 0 {
 		w.counter.Add(int64(n))
@@ -178,8 +222,13 @@ func (w countingWriter) Write(p []byte) (int, error) {
 
 type readerOnly struct {
 	reader io.Reader
+	touch  func()
 }
 
 func (r readerOnly) Read(p []byte) (int, error) {
+	if r.touch != nil {
+		r.touch()
+	}
+
 	return r.reader.Read(p)
 }

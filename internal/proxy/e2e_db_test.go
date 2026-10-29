@@ -52,7 +52,7 @@ func TestProxyPipelinePostgresE2E(t *testing.T) {
 		_, _ = io.Copy(io.Discard, conn)
 	})
 
-	server, err := NewServer(cfg, zap.NewNop(), analytics.Collector(), m)
+	server, err := NewServer(cfg, zap.NewNop(), analytics.Collector(), m, nil)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}

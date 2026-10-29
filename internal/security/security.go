@@ -10,32 +10,83 @@ import (
 	"time"
 )
 
-// Authenticator validates SOCKS5 username/password credentials (RFC 1929).
-type Authenticator struct {
-	username string
-	password string
-	enabled  bool
+// WorkloadCredential maps a workload identity to SOCKS5 credentials.
+type WorkloadCredential struct {
+	WorkloadID string
+	Username   string
+	Password   string
 }
 
-// NewAuthenticator creates a new authenticator with the given credentials.
+// Authenticator validates SOCKS5 username/password credentials (RFC 1929) and
+// resolves them to a workload identity.
+type Authenticator struct {
+	credentials map[string]credentialEntry
+	enabled     bool
+}
+
+type credentialEntry struct {
+	password   string
+	workloadID string
+}
+
+// NewAuthenticator creates a new authenticator with a single legacy credential.
+// The resolved workload identity is "default".
 func NewAuthenticator(username, password string) *Authenticator {
-	return &Authenticator{
-		username: username,
-		password: password,
-		enabled:  true,
+	auth := &Authenticator{
+		credentials: make(map[string]credentialEntry),
+		enabled:     true,
 	}
+	auth.credentials[username] = credentialEntry{password: password, workloadID: "default"}
+
+	return auth
+}
+
+// NewAuthenticatorFromWorkloads creates an authenticator for multiple workloads.
+func NewAuthenticatorFromWorkloads(credentials []WorkloadCredential) *Authenticator {
+	auth := &Authenticator{
+		credentials: make(map[string]credentialEntry),
+		enabled:     true,
+	}
+
+	for _, credential := range credentials {
+		auth.credentials[credential.Username] = credentialEntry{
+			password:   credential.Password,
+			workloadID: credential.WorkloadID,
+		}
+	}
+
+	return auth
 }
 
 // Authenticate checks the provided credentials using constant-time comparisons.
 func (a *Authenticator) Authenticate(username, password string) bool {
+	_, ok := a.AuthenticateWithIdentity(username, password)
+
+	return ok
+}
+
+// AuthenticateWithIdentity validates credentials and returns the workload identity.
+func (a *Authenticator) AuthenticateWithIdentity(username, password string) (string, bool) {
 	if !a.enabled {
-		return true
+		return "", true
 	}
 
-	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.username)) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.password)) == 1
+	entry, ok := a.credentials[username]
+	if !ok {
+		// Constant-time dummy comparison to avoid timing leaks.
+		subtle.ConstantTimeCompare([]byte(password), []byte{})
 
-	return userMatch && passMatch
+		return "", false
+	}
+
+	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(username)) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(entry.password)) == 1
+
+	if !userMatch || !passMatch {
+		return "", false
+	}
+
+	return entry.workloadID, true
 }
 
 // IsEnabled returns whether authentication is enabled.

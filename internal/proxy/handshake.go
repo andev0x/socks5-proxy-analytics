@@ -45,6 +45,7 @@ func (e *handshakeError) Error() string {
 }
 
 type request struct {
+	workloadID    string
 	requestedHost string
 	dialHost      string
 	port          int
@@ -55,7 +56,8 @@ type request struct {
 func (s *Server) handshake(conn net.Conn) (*request, *bufio.Reader, error) {
 	reader := bufio.NewReader(conn)
 
-	if err := s.negotiateAuth(conn, reader); err != nil {
+	workloadID, err := s.negotiateAuth(conn, reader)
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -72,29 +74,31 @@ func (s *Server) handshake(conn net.Conn) (*request, *bufio.Reader, error) {
 		return nil, nil, err
 	}
 
+	req.workloadID = workloadID
+
 	return req, reader, nil
 }
 
-func (s *Server) negotiateAuth(conn net.Conn, reader *bufio.Reader) error {
+func (s *Server) negotiateAuth(conn net.Conn, reader *bufio.Reader) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		return &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
 	}
 
 	if header[0] != socksVersion {
-		return &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
 	}
 
 	methodCount := int(header[1])
 	if methodCount == 0 {
 		_, _ = conn.Write([]byte{socksVersion, methodNoAcceptable})
 
-		return &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
 	}
 
 	methods := make([]byte, methodCount)
 	if _, err := io.ReadFull(reader, methods); err != nil {
-		return &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
 	}
 
 	requiredMethod := methodNoAuth
@@ -105,26 +109,26 @@ func (s *Server) negotiateAuth(conn net.Conn, reader *bufio.Reader) error {
 	if !containsMethod(methods, requiredMethod) {
 		_, _ = conn.Write([]byte{socksVersion, methodNoAcceptable})
 
-		return &handshakeError{reason: metrics.HandshakeNoAcceptableAuth}
+		return "", &handshakeError{reason: metrics.HandshakeNoAcceptableAuth}
 	}
 
 	if _, err := conn.Write([]byte{socksVersion, requiredMethod}); err != nil {
-		return &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
 	}
 
 	if s.auth == nil {
-		return nil
+		return "", nil
 	}
 
 	return s.authenticateUserPass(conn, reader)
 }
 
-func (s *Server) authenticateUserPass(conn net.Conn, reader *bufio.Reader) error {
+func (s *Server) authenticateUserPass(conn net.Conn, reader *bufio.Reader) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(reader, header); err != nil || header[0] != authVersion {
 		_, _ = conn.Write([]byte{authVersion, 0x01})
 
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
 	username := make([]byte, int(header[1]))
@@ -134,34 +138,35 @@ func (s *Server) authenticateUserPass(conn net.Conn, reader *bufio.Reader) error
 		_, _ = conn.Write([]byte{authVersion, 0x01})
 		s.m.AuthFailures.Inc()
 
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
 	if _, err := io.ReadFull(reader, username); err != nil {
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
 	if _, err := io.ReadFull(reader, passwordLength); err != nil {
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
 	password := make([]byte, int(passwordLength[0]))
 	if _, err := io.ReadFull(reader, password); err != nil {
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
-	if !s.auth.Authenticate(string(username), string(password)) {
+	workloadID, ok := s.auth.AuthenticateWithIdentity(string(username), string(password))
+	if !ok {
 		_, _ = conn.Write([]byte{authVersion, 0x01})
 		s.m.AuthFailures.Inc()
 
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
 	if _, err := conn.Write([]byte{authVersion, 0x00}); err != nil {
-		return &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
 	}
 
-	return nil
+	return workloadID, nil
 }
 
 func containsMethod(methods []byte, method byte) bool {

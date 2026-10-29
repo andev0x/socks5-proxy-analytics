@@ -3,9 +3,10 @@
 A Go SOCKS5 proxy with an asynchronous traffic-analytics pipeline, PostgreSQL storage, a
 Prometheus metrics endpoint and a small analytics API.
 
-**Phase 1 status:** the Phase 1 network-observability foundation is implemented and tested,
-but this is **not production-ready**. See [Limitations](#limitations-and-non-goals) and
-[docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md).
+**Phase 2 status:** controlled egress (workload identity + deterministic policy) is implemented
+and tested on top of the Phase 1 observability foundation. It remains **not production-ready**.
+See [docs/phase-2-design.md](docs/phase-2-design.md) and
+[docs/phase-2-closure-report.md](docs/phase-2-closure-report.md).
 
 - Architecture baseline: [docs/socks5-proxy-analytics-architecture.md](docs/socks5-proxy-analytics-architecture.md)
 - Phase 1 plan, decisions and evidence: [docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md)
@@ -204,6 +205,7 @@ Environment variables override the YAML file. `CONFIG_FILE` selects an explicit 
 | `PROXY_DIAL_TIMEOUT_MS` | `10000` | Upstream connect timeout |
 | `PROXY_HANDSHAKE_TIMEOUT_MS` | `10000` | SOCKS5 negotiation deadline |
 | `PROXY_SHUTDOWN_GRACE_MS` | `5000` | Active-session grace before force close |
+| `PROXY_IDLE_TIMEOUT_MS` | `0` | Idle timeout during relay (0 disables) |
 | `PROXY_AUTH_ENABLED` | `false` | Require RFC 1929 authentication |
 | `PROXY_AUTH_USERNAME` / `PROXY_AUTH_PASSWORD` | empty | Required when auth is enabled |
 | `PROXY_IP_WHITELIST` | empty | Comma-separated IPs/CIDRs; empty allows all |
@@ -219,6 +221,17 @@ Environment variables override the YAML file. `CONFIG_FILE` selects an explicit 
 | `METRICS_ADDRESS` / `METRICS_PORT` | `127.0.0.1` / `9090` | Metrics listener |
 | `API_ADDRESS` / `API_PORT` | `127.0.0.1` / `8080` | Analytics API listener |
 | `API_READ_TIMEOUT_MS` / `API_WRITE_TIMEOUT_MS` / `API_IDLE_TIMEOUT_MS` | `10000` / `10000` / `60000` | HTTP timeouts |
+
+### Policy (Phase 2)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `POLICY_ENABLED` | `false` | Enable deterministic egress policy enforcement |
+| `POLICY_ID` | `default` | Policy identifier recorded in audit events |
+| `POLICY_VERSION` | `1` | Policy version recorded in audit events |
+| `POLICY_DEFAULT_ACTION` | `deny` | Must be `deny` |
+
+Workloads and rules are configured in YAML (`proxy.workloads`, `policy.rules`).
 
 ### Database
 
@@ -366,8 +379,9 @@ versioned migration tool or retention policy yet.
 
 - Best-effort analytics: no durable replay, no retention policy, no audit guarantee.
 - TCP CONNECT only; BIND/UDP ASSOCIATE rejected.
-- No idle-session timeout; long-lived sessions occupy connection slots.
-- No Phase 2 workload identity or destination policy engine.
+- Idle-session timeout is configurable (`PROXY_IDLE_TIMEOUT_MS`), disabled by default.
+- Phase 2 workload identity and destination policy are implemented; policy defaults to deny
+  and requires explicit allow rules.
 - API and metrics endpoints are unauthenticated; loopback defaults are the Phase 1 boundary.
 - `AutoMigrate` remains the schema mechanism.
 - Docker Compose build/runtime was verified locally with Colima: images built, all services

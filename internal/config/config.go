@@ -13,6 +13,30 @@ import (
 	"github.com/spf13/viper"
 )
 
+// PolicyRuleConfig defines one declarative egress policy rule.
+type PolicyRuleConfig struct {
+	ID         string `mapstructure:"id"`
+	Workload   string `mapstructure:"workload"`
+	Action     string `mapstructure:"action"`
+	Host       string `mapstructure:"host"`
+	HostSuffix string `mapstructure:"host_suffix"`
+	IP         string `mapstructure:"ip"`
+	Port       int    `mapstructure:"port"`
+	PortStart  int    `mapstructure:"port_start"`
+	PortEnd    int    `mapstructure:"port_end"`
+	Priority   int    `mapstructure:"priority"`
+}
+
+// PolicyConfig holds Phase 2 egress policy settings.
+type PolicyConfig struct {
+	Enabled         bool               `mapstructure:"enabled"`
+	ID              string             `mapstructure:"id"`
+	Version         string             `mapstructure:"version"`
+	DefaultAction   string             `mapstructure:"default_action"`
+	RestrictedCIDRs []string           `mapstructure:"restricted_cidrs"`
+	Rules           []PolicyRuleConfig `mapstructure:"rules"`
+}
+
 // Config holds all application configuration loaded from
 // config files and environment variables.
 type Config struct {
@@ -24,18 +48,28 @@ type Config struct {
 	Logging   LoggingConfig   `mapstructure:"logging"`
 	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
 	Shutdown  ShutdownConfig  `mapstructure:"shutdown"`
+	Policy    PolicyConfig    `mapstructure:"policy"`
+}
+
+// WorkloadConfig defines a workload identity and its SOCKS5 credentials.
+type WorkloadConfig struct {
+	ID       string `mapstructure:"id"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
 }
 
 // ProxyConfig holds SOCKS5 listener, security and timeout settings.
 type ProxyConfig struct {
-	Address            string     `mapstructure:"address"`
-	Port               int        `mapstructure:"port"`
-	Auth               AuthConfig `mapstructure:"auth"`
-	MaxConnections     int        `mapstructure:"max_connections"`
-	IPWhitelist        []string   `mapstructure:"ip_whitelist"`
-	DialTimeoutMs      int        `mapstructure:"dial_timeout_ms"`
-	HandshakeTimeoutMs int        `mapstructure:"handshake_timeout_ms"`
-	ShutdownGraceMs    int        `mapstructure:"shutdown_grace_ms"`
+	Address            string           `mapstructure:"address"`
+	Port               int              `mapstructure:"port"`
+	Auth               AuthConfig       `mapstructure:"auth"`
+	Workloads          []WorkloadConfig `mapstructure:"workloads"`
+	MaxConnections     int              `mapstructure:"max_connections"`
+	IPWhitelist        []string         `mapstructure:"ip_whitelist"`
+	DialTimeoutMs      int              `mapstructure:"dial_timeout_ms"`
+	HandshakeTimeoutMs int              `mapstructure:"handshake_timeout_ms"`
+	ShutdownGraceMs    int              `mapstructure:"shutdown_grace_ms"`
+	IdleTimeoutMs      int              `mapstructure:"idle_timeout_ms"`
 }
 
 // AuthConfig holds optional SOCKS5 username/password authentication settings.
@@ -175,6 +209,11 @@ func bindEnvs(v *viper.Viper) {
 		"proxy.dial_timeout_ms":          "PROXY_DIAL_TIMEOUT_MS",
 		"proxy.handshake_timeout_ms":     "PROXY_HANDSHAKE_TIMEOUT_MS",
 		"proxy.shutdown_grace_ms":        "PROXY_SHUTDOWN_GRACE_MS",
+		"proxy.idle_timeout_ms":          "PROXY_IDLE_TIMEOUT_MS",
+		"policy.enabled":                 "POLICY_ENABLED",
+		"policy.id":                      "POLICY_ID",
+		"policy.version":                 "POLICY_VERSION",
+		"policy.default_action":          "POLICY_DEFAULT_ACTION",
 		"api.address":                    "API_ADDRESS",
 		"api.port":                       "API_PORT",
 		"api.read_timeout_ms":            "API_READ_TIMEOUT_MS",
@@ -221,7 +260,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proxy.dial_timeout_ms", 10000)
 	v.SetDefault("proxy.handshake_timeout_ms", 10000)
 	v.SetDefault("proxy.shutdown_grace_ms", 5000)
+	v.SetDefault("proxy.idle_timeout_ms", 0)
 
+	v.SetDefault("policy.enabled", false)
+	v.SetDefault("policy.id", "default")
+	v.SetDefault("policy.version", "1")
+	v.SetDefault("policy.default_action", "deny")
 	v.SetDefault("api.address", "127.0.0.1")
 	v.SetDefault("api.port", 8080)
 	v.SetDefault("api.read_timeout_ms", 10000)
@@ -286,6 +330,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validatePolicy(); err != nil {
+		return err
+	}
+
 	if err := c.validateLogging(); err != nil {
 		return err
 	}
@@ -326,7 +374,15 @@ func (c *Config) validateProxy() error {
 		return errors.New("proxy.shutdown_grace_ms must not be negative")
 	}
 
+	if c.Proxy.IdleTimeoutMs < 0 {
+		return errors.New("proxy.idle_timeout_ms must not be negative")
+	}
+
 	if err := validateProxyAuth(c.Proxy.Auth); err != nil {
+		return err
+	}
+
+	if err := validateWorkloads(c.Proxy.Workloads); err != nil {
 		return err
 	}
 
@@ -352,6 +408,35 @@ func validateProxyAuth(auth AuthConfig) error {
 
 	if strings.ContainsRune(auth.Username, 0) || strings.ContainsRune(auth.Password, 0) {
 		return errors.New("proxy.auth username and password must not contain NUL bytes")
+	}
+
+	return nil
+}
+
+func validateWorkloads(workloads []WorkloadConfig) error {
+	ids := make(map[string]struct{})
+	usernames := make(map[string]struct{})
+
+	for _, workload := range workloads {
+		if strings.TrimSpace(workload.ID) == "" {
+			return errors.New("proxy.workloads[].id is required")
+		}
+
+		if _, exists := ids[workload.ID]; exists {
+			return fmt.Errorf("duplicate workload id %q", workload.ID)
+		}
+
+		ids[workload.ID] = struct{}{}
+
+		if strings.TrimSpace(workload.Username) == "" || strings.TrimSpace(workload.Password) == "" {
+			return fmt.Errorf("workload %q requires username and password", workload.ID)
+		}
+
+		if _, exists := usernames[workload.Username]; exists {
+			return fmt.Errorf("duplicate workload username %q", workload.Username)
+		}
+
+		usernames[workload.Username] = struct{}{}
 	}
 
 	return nil
@@ -478,6 +563,62 @@ func validateSSLMode(sslMode string) error {
 	default:
 		return fmt.Errorf("database.sslmode %q is not supported", sslMode)
 	}
+}
+
+func (c *Config) validatePolicy() error {
+	if !c.Policy.Enabled {
+		return nil
+	}
+
+	if !c.Proxy.Auth.Enabled && len(c.Proxy.Workloads) == 0 {
+		return errors.New("policy.enabled requires proxy.auth.enabled with at least one workload")
+	}
+
+	switch c.Policy.DefaultAction {
+	case "", "deny":
+	default:
+		return errors.New("policy.default_action must be deny")
+	}
+
+	for i := range c.Policy.Rules {
+		if err := validatePolicyRule(&c.Policy.Rules[i]); err != nil {
+			return err
+		}
+	}
+
+	for _, cidr := range c.Policy.RestrictedCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			if net.ParseIP(cidr) == nil {
+				return fmt.Errorf("policy restricted_cidr %q is invalid", cidr)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validatePolicyRule(rule *PolicyRuleConfig) error {
+	if strings.TrimSpace(rule.Action) == "" {
+		return errors.New("policy rule action is required")
+	}
+
+	switch rule.Action {
+	case "allow", "deny":
+	default:
+		return fmt.Errorf("policy rule action %q must be allow or deny", rule.Action)
+	}
+
+	if rule.Port != 0 && (rule.Port < 1 || rule.Port > 65535) {
+		return fmt.Errorf("policy rule port %d is invalid", rule.Port)
+	}
+
+	if rule.PortStart != 0 || rule.PortEnd != 0 {
+		if rule.PortStart < 1 || rule.PortEnd < rule.PortStart || rule.PortEnd > 65535 {
+			return fmt.Errorf("policy rule port range %d-%d is invalid", rule.PortStart, rule.PortEnd)
+		}
+	}
+
+	return nil
 }
 
 func (c *Config) validateRateLimit() error {

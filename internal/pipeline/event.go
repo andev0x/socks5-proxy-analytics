@@ -16,6 +16,8 @@ const (
 	OutcomeDialFailed      = "dial_failed"
 	OutcomeAuthFailed      = "auth_failed"
 	OutcomeHandshakeFailed = "handshake_failed"
+	OutcomePolicyDenied    = "policy_denied"
+	OutcomeDNSFailed       = "dns_failed"
 )
 
 // Termination reasons persisted in the analytics schema.
@@ -31,6 +33,9 @@ const (
 	ReasonUnsupportedAddressType = "unsupported_address_type"
 	ReasonNoAcceptableAuth       = "no_acceptable_auth"
 	ReasonTimeout                = "timeout"
+	ReasonPolicyDenied           = "policy_denied"
+	ReasonRestrictedDestination  = "restricted_destination"
+	ReasonDNSFailure             = "dns_resolution_failed"
 )
 
 // ConnectionEvent is the raw, best-effort event emitted at the end of a SOCKS5 session.
@@ -46,6 +51,11 @@ type ConnectionEvent struct {
 	Protocol              string
 	Outcome               string
 	TerminationReason     string
+	WorkloadID            string
+	PolicyDecision        string
+	PolicyReason          string
+	PolicyID              string
+	PolicyVersion         string
 	DialLatencyMs         int64
 	DurationMs            int64
 	BytesClientToUpstream int64

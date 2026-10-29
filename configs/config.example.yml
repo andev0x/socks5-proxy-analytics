@@ -11,10 +11,14 @@ proxy:
   dial_timeout_ms: 10000
   handshake_timeout_ms: 10000
   shutdown_grace_ms: 5000
+  idle_timeout_ms: 0
   auth:
     enabled: false
     username: ""
     password: ""
+  # Workload identities (Phase 2). When policy.enabled is true, at least one
+  # workload is required and proxy.auth.enabled must be true.
+  workloads: []
   # Exact IPs and CIDR ranges. Empty means "allow all clients".
   ip_whitelist: []
 
@@ -66,3 +70,19 @@ rate_limit:
 # Overall shutdown deadline: stop accepting, grace for sessions, drain and flush.
 shutdown:
   timeout_ms: 15000
+
+# Phase 2 egress policy. Default action is always deny.
+policy:
+  enabled: false
+  id: "default"
+  version: "1"
+  default_action: "deny"
+  restricted_cidrs: []
+  rules: []
+  # Example:
+  # rules:
+  #   - id: "allow-api"
+  #     workload: "agent-1"
+  #     action: "allow"
+  #     host: "api.example.com"
+  #     port: 443
