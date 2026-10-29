@@ -2,7 +2,7 @@
 
 ## 1. Prerequisites
 
-- Go 1.26.0+ for source builds.
+- Go 1.26.10+ for source builds.
 - PostgreSQL 15+.
 - A database role and database for analytics.
 

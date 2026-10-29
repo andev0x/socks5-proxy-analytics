@@ -116,7 +116,7 @@ degrades analytics and becomes visible in metrics and logs.
 
 ## Quick start (local, clean checkout)
 
-Prerequisites: Go 1.26.0+, PostgreSQL 15+ (16+ recommended), and a database user.
+Prerequisites: Go 1.26.10+, PostgreSQL 15+ (16+ recommended), and a database user.
 
 ```bash
 git clone <repo-url> socks5-proxy-analytics
