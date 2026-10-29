@@ -470,10 +470,16 @@ func (s *testSink) Collect(event pipeline.ConnectionEvent) bool {
 func (s *testSink) wait(tb testing.TB) pipeline.ConnectionEvent {
 	tb.Helper()
 
+	return s.waitFor(tb, 3*time.Second)
+}
+
+func (s *testSink) waitFor(tb testing.TB, timeout time.Duration) pipeline.ConnectionEvent {
+	tb.Helper()
+
 	select {
 	case event := <-s.events:
 		return event
-	case <-time.After(3 * time.Second):
+	case <-time.After(timeout):
 		tb.Fatal("timed out waiting for connection event")
 
 		return pipeline.ConnectionEvent{}
@@ -644,7 +650,12 @@ func openSOCKS(
 		t.Fatalf("write request: %v", err)
 	}
 
-	return conn, readReply(t, conn)
+	code = readReply(t, conn)
+	// The handshake deadline must not leak into the caller: relay benchmarks and long-lived
+	// test sessions would otherwise fail after three seconds.
+	_ = conn.SetDeadline(time.Time{})
+
+	return conn, code
 }
 
 func authenticateClient(tb testing.TB, conn net.Conn, credentials *proxyCredentials) byte {
@@ -853,13 +864,15 @@ func TestCONNECTIPv6PreservesAttribution(t *testing.T) {
 
 func TestMalformedGreetingIsReported(t *testing.T) {
 	cases := []struct {
-		name    string
-		payload []byte
+		name     string
+		payload  []byte
+		expected string
 	}{
-		{"truncated", []byte{socksVersion}},
-		{"bad_version", []byte{0x04, 0x01, 0x00}},
-		{"zero_methods", []byte{socksVersion, 0x00}},
-		{"truncated_methods", []byte{socksVersion, 0x02, 0x00}},
+		// A partial message followed by silence is a handshake timeout, not malformed input.
+		{"truncated", []byte{socksVersion}, metrics.HandshakeTimeout},
+		{"bad_version", []byte{0x04, 0x01, 0x00}, metrics.HandshakeMalformedGreeting},
+		{"zero_methods", []byte{socksVersion, 0x00}, metrics.HandshakeMalformedGreeting},
+		{"truncated_methods", []byte{socksVersion, 0x02, 0x00}, metrics.HandshakeTimeout},
 	}
 
 	for _, tc := range cases {
@@ -874,7 +887,7 @@ func TestMalformedGreetingIsReported(t *testing.T) {
 				t.Fatalf("dial proxy: %v", err)
 			}
 
-			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 			if _, err := conn.Write(tc.payload); err != nil {
 				t.Fatalf("write greeting: %v", err)
 			}
@@ -888,8 +901,8 @@ func TestMalformedGreetingIsReported(t *testing.T) {
 				t.Errorf("Outcome = %q, want handshake_failed", event.Outcome)
 			}
 
-			if event.TerminationReason != metrics.HandshakeMalformedGreeting {
-				t.Errorf("TerminationReason = %q, want %q", event.TerminationReason, metrics.HandshakeMalformedGreeting)
+			if event.TerminationReason != tc.expected {
+				t.Errorf("TerminationReason = %q, want %q", event.TerminationReason, tc.expected)
 			}
 
 			_ = m
@@ -903,7 +916,7 @@ func TestMalformedRequestVariants(t *testing.T) {
 		server, _ := startTestProxy(t, testProxyConfig(), sink)
 
 		conn := greetNoAuth(t, server.Addr().String())
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 		if _, err := conn.Write([]byte{socksVersion, commandConnect, 0x00}); err != nil {
 			t.Fatalf("write partial request: %v", err)
 		}
@@ -913,8 +926,8 @@ func TestMalformedRequestVariants(t *testing.T) {
 		_ = conn.Close()
 
 		event := sink.wait(t)
-		if event.TerminationReason != pipeline.ReasonMalformedRequest {
-			t.Errorf("TerminationReason = %q, want malformed_request", event.TerminationReason)
+		if event.TerminationReason != metrics.HandshakeTimeout {
+			t.Errorf("TerminationReason = %q, want %q", event.TerminationReason, metrics.HandshakeTimeout)
 		}
 	})
 
@@ -923,7 +936,7 @@ func TestMalformedRequestVariants(t *testing.T) {
 		server, _ := startTestProxy(t, testProxyConfig(), sink)
 
 		conn := greetNoAuth(t, server.Addr().String())
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		bindRequest := []byte{socksVersion, 0x02, 0x00, addressIPv4, 127, 0, 0, 1, 0, 80}
 		if _, err := conn.Write(bindRequest); err != nil {
@@ -949,7 +962,7 @@ func TestMalformedRequestVariants(t *testing.T) {
 		server, _ := startTestProxy(t, testProxyConfig(), sink)
 
 		conn := greetNoAuth(t, server.Addr().String())
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		request := []byte{socksVersion, commandConnect, 0x00, 0x02, 127, 0, 0, 1, 0, 80}
 		if _, err := conn.Write(request); err != nil {
@@ -977,7 +990,7 @@ func TestMalformedRequestVariants(t *testing.T) {
 		server, _ := startTestProxy(t, testProxyConfig(), sink)
 
 		conn := greetNoAuth(t, server.Addr().String())
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		request := []byte{socksVersion, commandConnect, 0x00, addressDomain, 0x00, 0x00, 0x50}
 		if _, err := conn.Write(request); err != nil {
@@ -999,7 +1012,7 @@ func TestMalformedRequestVariants(t *testing.T) {
 		server, _ := startTestProxy(t, testProxyConfig(), sink)
 
 		conn := greetNoAuth(t, server.Addr().String())
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		request := []byte{socksVersion, commandConnect, 0x00, addressIPv4, 127, 0, 0, 1, 0, 0}
 		if _, err := conn.Write(request); err != nil {
@@ -1032,7 +1045,7 @@ func TestTruncatedAuthIsReported(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := conn.Write([]byte{socksVersion, 0x01, methodUserPassword}); err != nil {
 		t.Fatalf("write greeting: %v", err)
 	}

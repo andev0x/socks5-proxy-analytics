@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"github.com/andev0x/socks5-proxy-analytics/internal/pipeline"
 	"github.com/andev0x/socks5-proxy-analytics/internal/policy"
 	"github.com/andev0x/socks5-proxy-analytics/internal/security"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -34,6 +36,18 @@ const (
 	dialReasonOther       = "other"
 )
 
+const (
+	// relayLingerTimeout bounds how long a session may stay open after the upstream half of
+	// the relay has finished. Without it, a client that never closes its socket pins a
+	// goroutine and two descriptors for the lifetime of the process when idle_timeout_ms is 0.
+	relayLingerTimeout = 5 * time.Second
+
+	// handshakeBufferSize is enough for the largest SOCKS5 negotiation message (a 255-byte
+	// domain plus the surrounding headers). A 4 KiB default per connection would waste
+	// memory and allocation bandwidth at high connection rates.
+	handshakeBufferSize = 512
+)
+
 // Server owns the SOCKS5 listener, admitted sessions and their cleanup.
 type Server struct {
 	cfg          *config.Config
@@ -44,6 +58,9 @@ type Server struct {
 	whitelist    *security.IPWhitelist
 	limiter      *security.RateLimiter
 	policyEngine *policy.Engine
+
+	relayBytesClientToUpstream prometheus.Counter
+	relayBytesUpstreamToClient prometheus.Counter
 
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -64,6 +81,10 @@ func NewServer(
 ) (*Server, error) {
 	if sink == nil || m == nil {
 		return nil, errors.New("proxy requires an event sink and metrics registry")
+	}
+
+	if cfg.Policy.Enabled && policyEngine == nil {
+		return nil, errors.New("policy.enabled is true but no egress policy engine was provided")
 	}
 
 	whitelist, err := security.NewIPWhitelist(cfg.Proxy.IPWhitelist)
@@ -88,6 +109,9 @@ func NewServer(
 		policyEngine: policyEngine,
 		conns:        make(map[net.Conn]struct{}),
 		acceptDone:   make(chan struct{}),
+
+		relayBytesClientToUpstream: m.RelayBytes.WithLabelValues(metrics.DirectionClientToUpstream),
+		relayBytesUpstreamToClient: m.RelayBytes.WithLabelValues(metrics.DirectionUpstreamToClient),
 	}
 
 	if cfg.Proxy.Auth.Enabled {
@@ -211,7 +235,7 @@ func (s *Server) admit(conn net.Conn) bool {
 		return false
 	}
 
-	s.m.ActiveConnections.Set(float64(active))
+	s.m.ActiveConnections.Inc()
 	s.m.AcceptedConnections.Inc()
 	s.track(conn)
 
@@ -497,30 +521,44 @@ func (s *Server) recordHandshakeFailure(sess *session, err error) {
 		handshakeErr = &handshakeError{reason: metrics.HandshakeMalformedRequest}
 	}
 
-	sess.outcome = pipeline.OutcomeHandshakeFailed
-	sess.reason = handshakeErr.reason
+	reason := handshakeErr.reason
+	if isTimeoutError(err) {
+		reason = metrics.HandshakeTimeout
+	}
 
-	if handshakeErr.reason == pipeline.ReasonAuthFailed {
+	sess.outcome = pipeline.OutcomeHandshakeFailed
+	sess.reason = reason
+
+	if reason == metrics.HandshakeAuthFailed {
 		sess.outcome = pipeline.OutcomeAuthFailed
 	}
 
-	s.m.HandshakeFailures.WithLabelValues(handshakeErr.reason).Inc()
+	s.m.HandshakeFailures.WithLabelValues(reason).Inc()
 	s.log.Debug("SOCKS5 handshake rejected",
 		zap.String("client_ip", sess.clientIP),
-		zap.String("reason", handshakeErr.reason))
+		zap.String("reason", reason))
+}
+
+// isTimeoutError reports whether err is an I/O deadline expiry rather than malformed input.
+func isTimeoutError(err error) bool {
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (s *Server) finish(client net.Conn, sess *session) {
 	s.untrack(client)
 	_ = client.Close()
 
-	remaining := s.active.Add(-1)
-	if remaining < 0 {
+	if s.active.Add(-1) < 0 {
 		s.active.Store(0)
-		remaining = 0
 	}
 
-	s.m.ActiveConnections.Set(float64(remaining))
+	s.m.ActiveConnections.Dec()
 	sess.finish(time.Now().UTC())
 	s.m.ConnectionDuration.Observe(float64(sess.durationMs()) / 1000.0)
 

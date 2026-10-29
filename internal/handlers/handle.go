@@ -15,12 +15,18 @@ import (
 
 const (
 	jsonErrorKey = "error"
+	statusKey    = "status"
 
 	defaultStatsLimit = 10
 	maxStatsLimit     = 1000
 	defaultLogsLimit  = 100
+	maxLogsOffset     = 1_000_000
 	defaultWindow     = 24 * time.Hour
 	maxWindow         = 90 * 24 * time.Hour
+
+	// queryTimeout bounds a single database query so a slow or stuck database cannot hold an
+	// API connection until the server write timeout.
+	queryTimeout = 10 * time.Second
 )
 
 // Handler handles HTTP requests for the analytics API.
@@ -43,7 +49,10 @@ func (h *Handler) GetTopDestinations(c *gin.Context) {
 		return
 	}
 
-	destinations, err := h.repo.GetTopDestinations(c.Request.Context(), limit)
+	ctx, cancel := queryContext(c)
+	defer cancel()
+
+	destinations, err := h.repo.GetTopDestinations(ctx, limit)
 	if err != nil {
 		h.internalError(c, "failed to get top destinations", err)
 
@@ -62,7 +71,10 @@ func (h *Handler) GetTopClientIPs(c *gin.Context) {
 		return
 	}
 
-	clients, err := h.repo.GetTopClientIPs(c.Request.Context(), limit)
+	ctx, cancel := queryContext(c)
+	defer cancel()
+
+	clients, err := h.repo.GetTopClientIPs(ctx, limit)
 	if err != nil {
 		h.internalError(c, "failed to get top client IPs", err)
 
@@ -81,7 +93,10 @@ func (h *Handler) GetTrafficStats(c *gin.Context) {
 		return
 	}
 
-	stats, err := h.repo.GetTrafficStats(c.Request.Context(), startTime, endTime)
+	ctx, cancel := queryContext(c)
+	defer cancel()
+
+	stats, err := h.repo.GetTrafficStats(ctx, startTime, endTime)
 	if err != nil {
 		h.internalError(c, "failed to get traffic stats", err)
 
@@ -114,7 +129,10 @@ func (h *Handler) GetTrafficLogs(c *gin.Context) {
 		return
 	}
 
-	logs, err := h.repo.GetTrafficByTimeRange(c.Request.Context(), startTime, endTime, limit, offset)
+	ctx, cancel := queryContext(c)
+	defer cancel()
+
+	logs, err := h.repo.GetTrafficByTimeRange(ctx, startTime, endTime, limit, offset)
 	if err != nil {
 		h.internalError(c, "failed to get traffic logs", err)
 
@@ -124,6 +142,11 @@ func (h *Handler) GetTrafficLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, logs)
 }
 
+// Live reports process liveness without touching the database.
+func (h *Handler) Live(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{statusKey: "ok"})
+}
+
 // Health verifies database reachability for health/readiness checks.
 func (h *Handler) Health(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
@@ -131,12 +154,12 @@ func (h *Handler) Health(c *gin.Context) {
 
 	if err := h.repo.Ping(ctx); err != nil {
 		h.log.Error("database health check failed", zap.Error(err))
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{statusKey: "unavailable"})
 
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{statusKey: "ok"})
 }
 
 func (h *Handler) internalError(c *gin.Context, message string, err error) {
@@ -169,11 +192,17 @@ func parseOffset(c *gin.Context) (int, error) {
 	}
 
 	value, err := strconv.Atoi(raw)
-	if err != nil || value < 0 {
-		return 0, errors.New("offset must be a non-negative integer")
+	if err != nil || value < 0 || value > maxLogsOffset {
+		return 0, errors.New("offset must be a non-negative integer no greater than " +
+			strconv.Itoa(maxLogsOffset))
 	}
 
 	return value, nil
+}
+
+// queryContext bounds a single repository call.
+func queryContext(c *gin.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.Request.Context(), queryTimeout)
 }
 
 func parseTimeRange(c *gin.Context) (startTime, endTime time.Time, err error) {

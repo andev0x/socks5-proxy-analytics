@@ -48,6 +48,21 @@ jobs:
     - name: Vet
       run: go vet ./...
 
+    - name: Formatting
+      run: |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "Not gofmt-formatted:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+    - name: Build benchmark harnesses
+      run: go build ./benchmarks/...
+
+    - name: Verify benchmark compilation
+      run: go test -run '^$' -bench '^$' ./...
+
     - name: Run tests (including PostgreSQL integration)
       run: go test -v -race -coverprofile=coverage.out ./...
       env:

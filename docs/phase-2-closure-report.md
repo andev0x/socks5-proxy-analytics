@@ -1,5 +1,12 @@
 # Phase 2 — Closure Report
 
+> **Historical document.** This describes an earlier iteration and may not match the current
+> implementation. The current evidence is in [audit/baseline.md](audit/baseline.md),
+> [audit/correctness.md](audit/correctness.md), [audit/security.md](audit/security.md),
+> [benchmarks.md](benchmarks.md), and the release status is in
+> [release-readiness.md](release-readiness.md).
+
+
 ## 1. Executive verdict
 
 Phase 2 core security foundation is implemented and verified by automated tests and

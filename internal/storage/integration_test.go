@@ -19,7 +19,9 @@ func TestPostgresRepositoryIntegration(t *testing.T) {
 		t.Skip("TEST_DB_HOST is not set; PostgreSQL integration test skipped")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	cfg = isolatedDatabaseConfig(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	db, err := NewDatabase(ctx, cfg)

@@ -21,6 +21,8 @@ func TestProxyPipelinePostgresE2E(t *testing.T) {
 		t.Skip("TEST_DB_HOST is not set; proxy/database E2E test skipped")
 	}
 
+	cfg = isolatedDatabaseConfig(t, cfg)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

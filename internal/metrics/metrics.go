@@ -172,11 +172,11 @@ func (m *Metrics) initializePipelineMetrics() {
 	})
 	m.EventsPublishDropped = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "pipeline_events_publish_dropped_total",
-		Help: "Traffic records lost after all publisher retries were exhausted.",
+		Help: "Traffic records permanently lost by the publisher (retries exhausted or shutdown abort).",
 	})
 	m.PublishFailures = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "pipeline_publish_failures_total",
-		Help: "Publisher batches that failed after all retries.",
+		Help: "Publisher batches that were not persisted (retries exhausted or shutdown abort).",
 	})
 	m.PublishRetries = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "pipeline_publish_retries_total",
