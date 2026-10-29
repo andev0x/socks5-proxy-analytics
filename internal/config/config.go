@@ -70,6 +70,7 @@ type ProxyConfig struct {
 	HandshakeTimeoutMs int              `mapstructure:"handshake_timeout_ms"`
 	ShutdownGraceMs    int              `mapstructure:"shutdown_grace_ms"`
 	IdleTimeoutMs      int              `mapstructure:"idle_timeout_ms"`
+	RelayBufferKB      int              `mapstructure:"relay_buffer_kb"`
 }
 
 // AuthConfig holds optional SOCKS5 username/password authentication settings.
@@ -210,6 +211,7 @@ func bindEnvs(v *viper.Viper) {
 		"proxy.handshake_timeout_ms":     "PROXY_HANDSHAKE_TIMEOUT_MS",
 		"proxy.shutdown_grace_ms":        "PROXY_SHUTDOWN_GRACE_MS",
 		"proxy.idle_timeout_ms":          "PROXY_IDLE_TIMEOUT_MS",
+		"proxy.relay_buffer_kb":          "PROXY_RELAY_BUFFER_KB",
 		"policy.enabled":                 "POLICY_ENABLED",
 		"policy.id":                      "POLICY_ID",
 		"policy.version":                 "POLICY_VERSION",
@@ -261,6 +263,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proxy.handshake_timeout_ms", 10000)
 	v.SetDefault("proxy.shutdown_grace_ms", 5000)
 	v.SetDefault("proxy.idle_timeout_ms", 0)
+	v.SetDefault("proxy.relay_buffer_kb", 32)
 
 	v.SetDefault("policy.enabled", false)
 	v.SetDefault("policy.id", "default")
@@ -378,7 +381,11 @@ func (c *Config) validateProxy() error {
 		return errors.New("proxy.idle_timeout_ms must not be negative")
 	}
 
-	if err := validateProxyAuth(c.Proxy.Auth); err != nil {
+	if c.Proxy.RelayBufferKB < 4 || c.Proxy.RelayBufferKB > 1024 {
+		return errors.New("proxy.relay_buffer_kb must be between 4 and 1024")
+	}
+
+	if err := validateProxyAuth(c.Proxy.Auth, c.Proxy.Workloads); err != nil {
 		return err
 	}
 
@@ -389,31 +396,52 @@ func (c *Config) validateProxy() error {
 	return validateIPWhitelist(c.Proxy.IPWhitelist)
 }
 
-func validateProxyAuth(auth AuthConfig) error {
+// validateProxyAuth validates the authentication settings. When workload identities are
+// configured they replace the legacy single credential, so the legacy username/password are
+// optional. Requiring them anyway made the documented workload configuration fail at startup.
+func validateProxyAuth(auth AuthConfig, workloads []WorkloadConfig) error {
+	if len(workloads) > 0 && !auth.Enabled {
+		return errors.New("proxy.workloads requires proxy.auth.enabled to be true")
+	}
+
 	if !auth.Enabled {
 		return nil
 	}
 
+	if len(workloads) > 0 {
+		return nil
+	}
+
 	if auth.Username == "" {
-		return errors.New("proxy.auth.username is required when proxy.auth.enabled is true")
+		return errors.New("proxy.auth.username is required when proxy.auth.enabled is true " +
+			"and no workloads are configured")
 	}
 
 	if auth.Password == "" {
-		return errors.New("proxy.auth.password is required when proxy.auth.enabled is true")
+		return errors.New("proxy.auth.password is required when proxy.auth.enabled is true " +
+			"and no workloads are configured")
 	}
 
-	if len(auth.Username) > 255 || len(auth.Password) > 255 {
-		return errors.New("proxy.auth username and password must be at most 255 bytes (RFC 1929)")
+	return validateCredentialShape(auth.Username, auth.Password, "proxy.auth")
+}
+
+func validateCredentialShape(username, password, field string) error {
+	if len(username) > 255 || len(password) > 255 {
+		return fmt.Errorf("%s username and password must be at most 255 bytes (RFC 1929)", field)
 	}
 
-	if strings.ContainsRune(auth.Username, 0) || strings.ContainsRune(auth.Password, 0) {
-		return errors.New("proxy.auth username and password must not contain NUL bytes")
+	if strings.ContainsRune(username, 0) || strings.ContainsRune(password, 0) {
+		return fmt.Errorf("%s username and password must not contain NUL bytes", field)
 	}
 
 	return nil
 }
 
 func validateWorkloads(workloads []WorkloadConfig) error {
+	if len(workloads) == 0 {
+		return nil
+	}
+
 	ids := make(map[string]struct{})
 	usernames := make(map[string]struct{})
 
@@ -430,6 +458,10 @@ func validateWorkloads(workloads []WorkloadConfig) error {
 
 		if strings.TrimSpace(workload.Username) == "" || strings.TrimSpace(workload.Password) == "" {
 			return fmt.Errorf("workload %q requires username and password", workload.ID)
+		}
+
+		if err := validateCredentialShape(workload.Username, workload.Password, "workload "+workload.ID); err != nil {
+			return err
 		}
 
 		if _, exists := usernames[workload.Username]; exists {

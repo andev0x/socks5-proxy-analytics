@@ -1,5 +1,10 @@
 # SOCKS5 Proxy Analytics --- Target Architecture
 
+> **Design baseline.** This document describes the intended architecture and may lag the
+> implementation. Verified current behavior and evidence are in [audit/correctness.md](audit/correctness.md)
+> and [release-readiness.md](release-readiness.md).
+
+
 **Status:** Architecture baseline for implementation planning\
 **Version:** 0.1\
 **Date:** 2026-10-28\

@@ -12,6 +12,9 @@ proxy:
   handshake_timeout_ms: 10000
   shutdown_grace_ms: 5000
   idle_timeout_ms: 0
+  # Per-direction relay copy buffer in KiB (4-1024). 64 KiB measured ~4% faster for bulk
+  # 64 KiB sessions, at ~64 KiB extra memory per active session.
+  relay_buffer_kb: 32
   auth:
     enabled: false
     username: ""

@@ -1,5 +1,12 @@
 # Verification Report
 
+> **Historical document.** This describes an earlier iteration and may not match the current
+> implementation. The current evidence is in [audit/baseline.md](audit/baseline.md),
+> [audit/correctness.md](audit/correctness.md), [audit/security.md](audit/security.md),
+> [benchmarks.md](benchmarks.md), and the release status is in
+> [release-readiness.md](release-readiness.md).
+
+
 ## Environment
 
 - OS: macOS (darwin/arm64)

@@ -1,5 +1,9 @@
 # Security and Operational Limitations
 
+> Summary of accepted limitations. Findings, evidence and residual-risk dispositions are in
+> [audit/security.md](audit/security.md); deployment requirements are in
+> [operations.md](operations.md).
+
 ## Security limitations
 
 1. **API and metrics are unauthenticated.**
@@ -13,13 +17,18 @@
    - Mitigation: restart during a maintenance window; keep connections draining.
    - Blocks release: No.
 
-3. **IPv4-mapped IPv6 is canonicalized in policy evaluation, but host firewall and
+3. **Private and cloud-metadata ranges are not restricted by default.**
+   - Impact: an allow rule that explicitly covers an RFC 1918 or metadata address can reach it.
+   - Mitigation: add those ranges to `policy.restricted_cidrs`.
+   - Blocks release: No, but required for SSRF-sensitive deployments.
+
+4. **IPv4-mapped IPv6 is canonicalized in policy evaluation, but host firewall and
    routing isolation remain deployment responsibilities.**
    - Impact: the gateway does not itself prevent all egress outside its process.
    - Mitigation: host/container firewall rules and network namespace isolation.
    - Blocks release: No, documented as a boundary.
 
-4. **Best-effort analytics, not durable audit.**
+5. **Best-effort analytics, not durable audit.**
    - Impact: dropped events or lost batches are possible under overload or process death.
    - Mitigation: metrics and logs expose drops; size queues appropriately.
    - Blocks release: No, explicitly declared.

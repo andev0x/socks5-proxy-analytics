@@ -397,3 +397,93 @@ func (r *fakeRepo) count() int {
 }
 
 var _ storage.Repository = (*fakeRepo)(nil)
+
+func TestPublisherAbortCancelsInFlightWriteAndCountsLoss(t *testing.T) {
+	m := mustMetrics(t)
+	repo := &fakeRepo{block: make(chan struct{})}
+	defer close(repo.block)
+
+	in := make(chan *models.TrafficLog, 1)
+	publisher := NewPublisher(in, repo, PublisherConfig{
+		BatchSize:     1,
+		FlushInterval: time.Hour,
+		MaxRetries:    10,
+		RetryBackoff:  time.Second,
+		FlushTimeout:  30 * time.Second,
+	}, m, zap.NewNop())
+	publisher.Start()
+
+	in <- trafficRecord()
+
+	// Let the publisher enter the blocked write, then abort as shutdown would.
+	time.Sleep(20 * time.Millisecond)
+	publisher.Abort()
+	// The normalizer owns closing the input channel; simulate that after abort.
+	close(in)
+
+	select {
+	case <-publisher.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("publisher did not stop promptly after Abort")
+	}
+
+	if got := testutil.ToFloat64(m.EventsPublished); got != 0 {
+		t.Fatalf("published metric = %v, want 0", got)
+	}
+
+	if got := testutil.ToFloat64(m.EventsPublishDropped); got != 1 {
+		t.Fatalf("dropped metric = %v, want 1", got)
+	}
+}
+
+func TestPipelineShutdownAbortAccountsForQueuedEvents(t *testing.T) {
+	m := mustMetrics(t)
+	repo := &fakeRepo{block: make(chan struct{})}
+	defer close(repo.block)
+
+	cfg := testConfig()
+	cfg.Pipeline.BufferSize = 100
+	cfg.Pipeline.BatchSize = 10
+	cfg.Pipeline.MaxRetries = 10
+	cfg.Pipeline.RetryBackoffMs = 1000
+	cfg.Pipeline.FlushTimeoutMs = 30000
+
+	analytics := NewPipeline(cfg, repo, m, zap.NewNop())
+	analytics.Start()
+
+	for i := 0; i < 5; i++ {
+		if !analytics.Emit(sampleEvent()) {
+			t.Fatal("event should be accepted")
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	if err := analytics.Shutdown(ctx); err == nil {
+		t.Fatal("expected a shutdown deadline error")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if testutil.ToFloat64(m.EventsPublishDropped) >= 5 {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("dropped metric = %v, want at least 5", testutil.ToFloat64(m.EventsPublishDropped))
+}
+
+func TestPipelineShutdownWithoutStartReturns(t *testing.T) {
+	m := mustMetrics(t)
+	analytics := NewPipeline(testConfig(), &fakeRepo{}, m, zap.NewNop())
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := analytics.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() without Start() error = %v", err)
+	}
+}

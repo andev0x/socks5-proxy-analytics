@@ -6,6 +6,8 @@
 /bin/
 
 # Test binary, build directory, and coverage files
+/loadtest
+/loadtest-result.json
 *.test
 *.out
 *.cover

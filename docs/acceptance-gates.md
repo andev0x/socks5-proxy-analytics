@@ -1,5 +1,8 @@
 # Acceptance Gate Report
 
+> **Superseded.** The current gate assessment is [release-readiness.md](release-readiness.md).
+
+
 | Gate | Status | Evidence |
 |---|---|---|
 | 1. Phase consolidation | PASS | Consolidation report; Phase 1/2 capabilities traced in current code |

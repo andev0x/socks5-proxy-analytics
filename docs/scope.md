@@ -1,4 +1,9 @@
 # SOCKS5 Proxy Server with Traffic Analysis (Golang)
+
+> **Design baseline.** This document describes the intended architecture and may lag the
+> implementation. Verified current behavior and evidence are in [audit/correctness.md](audit/correctness.md)
+> and [release-readiness.md](release-readiness.md).
+
 ## Project: socks5-proxy-analytics
 ## Author: andev0x
 

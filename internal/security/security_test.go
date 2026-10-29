@@ -159,3 +159,16 @@ func TestClientIP(t *testing.T) {
 		}
 	}
 }
+
+func TestClientIPCanonicalizesIPv4MappedIPv6(t *testing.T) {
+	mapped := &net.TCPAddr{IP: net.ParseIP("::ffff:127.0.0.1"), Port: 1234}
+	plain := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}
+
+	if got := ClientIP(mapped); got != "127.0.0.1" {
+		t.Fatalf("ClientIP(mapped) = %q, want 127.0.0.1", got)
+	}
+
+	if ClientIP(mapped) != ClientIP(plain) {
+		t.Fatal("mapped and plain IPv4 must share one limiter/allowlist identity")
+	}
+}

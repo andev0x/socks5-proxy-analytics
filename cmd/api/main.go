@@ -70,7 +70,9 @@ func buildHTTPServer(cfg *config.Config, repo storage.Repository, log *zap.Logge
 	router := gin.Default()
 	handler := handlers.NewHandler(repo, log)
 
+	router.GET("/livez", handler.Live)
 	router.GET("/health", handler.Health)
+	router.GET("/readyz", handler.Health)
 	router.GET("/stats/top-destinations", handler.GetTopDestinations)
 	router.GET("/stats/top-domains", handler.GetTopDestinations)
 	router.GET("/stats/top-client-ips", handler.GetTopClientIPs)

@@ -39,8 +39,9 @@ Also validated:
 
 - `DB_SSLMODE` must be one of `disable`, `allow`, `prefer`, `require`, `verify-ca`,
   `verify-full`.
-- `PROXY_AUTH_ENABLED=true` requires non-empty `PROXY_AUTH_USERNAME` and
-  `PROXY_AUTH_PASSWORD` (max 255 bytes, no NUL).
+- `PROXY_AUTH_ENABLED=true` requires either at least one `proxy.workloads` entry or
+  non-empty `PROXY_AUTH_USERNAME` and `PROXY_AUTH_PASSWORD` (max 255 bytes, no NUL).
+  Workloads require `PROXY_AUTH_ENABLED=true`.
 - Every `PROXY_IP_WHITELIST` entry must be an IP or CIDR.
 - Ports, timeouts, queue sizes and connection limits must be positive and within documented
   bounds.

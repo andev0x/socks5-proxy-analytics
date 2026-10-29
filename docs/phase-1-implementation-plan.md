@@ -1,5 +1,12 @@
 # Phase 1 — Network Observability: Implementation Report and Plan
 
+> **Historical document.** This describes an earlier iteration and may not match the current
+> implementation. The current evidence is in [audit/baseline.md](audit/baseline.md),
+> [audit/correctness.md](audit/correctness.md), [audit/security.md](audit/security.md),
+> [benchmarks.md](benchmarks.md), and the release status is in
+> [release-readiness.md](release-readiness.md).
+
+
 **Status:** Phase 1 foundation implemented and verified with the limitations below  
 **Baseline commit:** `b19ff66` (branch `main`, pre-change working tree)  
 **Architecture baseline:** [`docs/socks5-proxy-analytics-architecture.md`](socks5-proxy-analytics-architecture.md)  

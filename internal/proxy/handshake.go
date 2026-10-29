@@ -38,10 +38,20 @@ const (
 
 type handshakeError struct {
 	reason string
+	cause  error
 }
 
 func (e *handshakeError) Error() string {
 	return e.reason
+}
+
+// Unwrap exposes the underlying I/O error so timeouts can be classified accurately.
+func (e *handshakeError) Unwrap() error {
+	return e.cause
+}
+
+func handshakeIOError(reason string, err error) error {
+	return &handshakeError{reason: reason, cause: err}
 }
 
 type request struct {
@@ -54,7 +64,7 @@ type request struct {
 // handshake performs SOCKS5 method negotiation, optional RFC 1929 authentication and
 // request parsing. It returns a buffered reader that may contain pipelined payload bytes.
 func (s *Server) handshake(conn net.Conn) (*request, *bufio.Reader, error) {
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReaderSize(conn, handshakeBufferSize)
 
 	workloadID, err := s.negotiateAuth(conn, reader)
 	if err != nil {
@@ -82,7 +92,7 @@ func (s *Server) handshake(conn net.Conn) (*request, *bufio.Reader, error) {
 func (s *Server) negotiateAuth(conn net.Conn, reader *bufio.Reader) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", handshakeIOError(metrics.HandshakeMalformedGreeting, err)
 	}
 
 	if header[0] != socksVersion {
@@ -98,7 +108,7 @@ func (s *Server) negotiateAuth(conn net.Conn, reader *bufio.Reader) (string, err
 
 	methods := make([]byte, methodCount)
 	if _, err := io.ReadFull(reader, methods); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", handshakeIOError(metrics.HandshakeMalformedGreeting, err)
 	}
 
 	requiredMethod := methodNoAuth
@@ -113,7 +123,7 @@ func (s *Server) negotiateAuth(conn net.Conn, reader *bufio.Reader) (string, err
 	}
 
 	if _, err := conn.Write([]byte{socksVersion, requiredMethod}); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeMalformedGreeting}
+		return "", handshakeIOError(metrics.HandshakeMalformedGreeting, err)
 	}
 
 	if s.auth == nil {
@@ -128,7 +138,7 @@ func (s *Server) authenticateUserPass(conn net.Conn, reader *bufio.Reader) (stri
 	if _, err := io.ReadFull(reader, header); err != nil || header[0] != authVersion {
 		_, _ = conn.Write([]byte{authVersion, 0x01})
 
-		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", handshakeIOError(metrics.HandshakeAuthFailed, err)
 	}
 
 	username := make([]byte, int(header[1]))
@@ -142,16 +152,16 @@ func (s *Server) authenticateUserPass(conn net.Conn, reader *bufio.Reader) (stri
 	}
 
 	if _, err := io.ReadFull(reader, username); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", handshakeIOError(metrics.HandshakeAuthFailed, err)
 	}
 
 	if _, err := io.ReadFull(reader, passwordLength); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", handshakeIOError(metrics.HandshakeAuthFailed, err)
 	}
 
 	password := make([]byte, int(passwordLength[0]))
 	if _, err := io.ReadFull(reader, password); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", handshakeIOError(metrics.HandshakeAuthFailed, err)
 	}
 
 	workloadID, ok := s.auth.AuthenticateWithIdentity(string(username), string(password))
@@ -163,7 +173,7 @@ func (s *Server) authenticateUserPass(conn net.Conn, reader *bufio.Reader) (stri
 	}
 
 	if _, err := conn.Write([]byte{authVersion, 0x00}); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeAuthFailed}
+		return "", handshakeIOError(metrics.HandshakeAuthFailed, err)
 	}
 
 	return workloadID, nil
@@ -182,7 +192,7 @@ func containsMethod(methods []byte, method byte) bool {
 func readRequest(reader *bufio.Reader) (*request, error) {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		return nil, &handshakeError{reason: metrics.HandshakeMalformedRequest}
+		return nil, handshakeIOError(metrics.HandshakeMalformedRequest, err)
 	}
 
 	if header[0] != socksVersion || header[2] != 0x00 {
@@ -197,7 +207,7 @@ func readRequest(reader *bufio.Reader) (*request, error) {
 
 	portBytes := make([]byte, 2)
 	if _, err := io.ReadFull(reader, portBytes); err != nil {
-		return nil, &handshakeError{reason: metrics.HandshakeMalformedRequest}
+		return nil, handshakeIOError(metrics.HandshakeMalformedRequest, err)
 	}
 
 	port := int(portBytes[0])<<8 | int(portBytes[1])
@@ -239,7 +249,7 @@ func readAddress(reader *bufio.Reader, addressType byte) (host string, isDomain 
 func readIPAddress(reader *bufio.Reader, length int) (string, error) {
 	raw := make([]byte, length)
 	if _, err := io.ReadFull(reader, raw); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeMalformedRequest}
+		return "", handshakeIOError(metrics.HandshakeMalformedRequest, err)
 	}
 
 	return net.IP(raw).String(), nil
@@ -248,7 +258,7 @@ func readIPAddress(reader *bufio.Reader, length int) (string, error) {
 func readDomainAddress(reader *bufio.Reader) (string, error) {
 	length := make([]byte, 1)
 	if _, err := io.ReadFull(reader, length); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeMalformedRequest}
+		return "", handshakeIOError(metrics.HandshakeMalformedRequest, err)
 	}
 
 	if length[0] == 0 {
@@ -257,7 +267,7 @@ func readDomainAddress(reader *bufio.Reader) (string, error) {
 
 	raw := make([]byte, int(length[0]))
 	if _, err := io.ReadFull(reader, raw); err != nil {
-		return "", &handshakeError{reason: metrics.HandshakeMalformedRequest}
+		return "", handshakeIOError(metrics.HandshakeMalformedRequest, err)
 	}
 
 	host := string(raw)

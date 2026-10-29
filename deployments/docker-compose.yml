@@ -43,6 +43,9 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
 
   proxy:
     build:
@@ -67,6 +70,11 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # Must exceed SHUTDOWN_TIMEOUT_MS (default 15s) or Docker SIGKILLs the proxy
+    # before it can drain the analytics pipeline.
+    stop_grace_period: 30s
 
 volumes:
   pgdata:

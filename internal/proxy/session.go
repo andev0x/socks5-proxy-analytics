@@ -9,6 +9,7 @@ import (
 
 	"github.com/andev0x/socks5-proxy-analytics/internal/metrics"
 	"github.com/andev0x/socks5-proxy-analytics/internal/pipeline"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type session struct {
@@ -110,6 +111,15 @@ type relayResult struct {
 	err       error
 }
 
+// relayBufferSize returns the configured per-direction copy buffer size in bytes.
+func (s *Server) relayBufferSize() int {
+	if s.cfg == nil || s.cfg.Proxy.RelayBufferKB <= 0 {
+		return 32 * 1024
+	}
+
+	return s.cfg.Proxy.RelayBufferKB * 1024
+}
+
 func (s *Server) relay(client, upstream net.Conn, sess *session, idleTimeout time.Duration) {
 	results := make(chan relayResult, 2)
 	clientSource := io.Reader(client)
@@ -124,28 +134,67 @@ func (s *Server) relay(client, upstream net.Conn, sess *session, idleTimeout tim
 	}
 
 	go relayCopy(
-		upstream, clientSource, &sess.bytesClientToUpstream, s.m,
-		metrics.DirectionClientToUpstream, results, client, upstream, idleTimeout,
+		upstream, clientSource, &sess.bytesClientToUpstream, s.relayBytesClientToUpstream,
+		s.relayBufferSize(), metrics.DirectionClientToUpstream, results, client, upstream, idleTimeout,
 	)
 	go relayCopy(
-		client, upstream, &sess.bytesUpstreamToClient, s.m,
-		metrics.DirectionUpstreamToClient, results, client, upstream, idleTimeout,
+		client, upstream, &sess.bytesUpstreamToClient, s.relayBytesUpstreamToClient,
+		s.relayBufferSize(), metrics.DirectionUpstreamToClient, results, client, upstream, idleTimeout,
 	)
 
 	first := <-results
-	if first.err != nil {
+
+	var (
+		second       relayResult
+		lingerClosed bool
+	)
+
+	switch {
+	case first.err != nil:
+		// A copy error invalidates both directions.
 		_ = client.Close()
 		_ = upstream.Close()
-	}
 
-	second := <-results
+		second = <-results
+	case first.direction == metrics.DirectionUpstreamToClient:
+		// The upstream side is finished: no further data can arrive. CloseWrite already sent
+		// FIN to the client; wait a bounded time for the client to close so the reverse copy
+		// cannot pin a goroutine and descriptors indefinitely.
+		second, lingerClosed = waitForRelayCompletion(results, client, relayLingerTimeout)
+	default:
+		second = <-results
+	}
 
 	if sess.reason == "" {
-		sess.reason = relayTerminationReason(s, first, second)
+		if lingerClosed {
+			// The upstream closed normally; the reverse copy failed only because we closed
+			// the lingering client ourselves. This is not a relay error.
+			sess.reason = pipeline.ReasonUpstreamClose
+		} else {
+			sess.reason = relayTerminationReason(s, first, second)
+		}
 	}
 
-	if !s.forced.Load() && (first.err != nil || second.err != nil) {
+	if !s.forced.Load() && !lingerClosed && (first.err != nil || second.err != nil) {
 		s.m.RelayErrors.Inc()
+	}
+}
+
+// waitForRelayCompletion waits for the remaining relay copy, closing the client connection
+// after linger so a client that never closes cannot hold the session open forever.
+func waitForRelayCompletion(
+	results <-chan relayResult, client net.Conn, linger time.Duration,
+) (relayResult, bool) {
+	timer := time.NewTimer(linger)
+	defer timer.Stop()
+
+	select {
+	case result := <-results:
+		return result, false
+	case <-timer.C:
+		_ = client.Close()
+
+		return <-results, true
 	}
 }
 
@@ -153,7 +202,8 @@ func relayCopy(
 	dst net.Conn,
 	src io.Reader,
 	counter *atomic.Int64,
-	m *metrics.Metrics,
+	relayBytes prometheus.Counter,
+	bufferSize int,
 	direction string,
 	results chan<- relayResult,
 	client, upstream net.Conn,
@@ -170,9 +220,12 @@ func relayCopy(
 
 	touch()
 
-	_, err := io.Copy(
-		countingWriter{dst: dst, counter: counter, m: m, direction: direction, touch: touch},
+	buffer := make([]byte, bufferSize)
+
+	_, err := io.CopyBuffer(
+		countingWriter{dst: dst, counter: counter, relayBytes: relayBytes, touch: touch},
 		readerOnly{reader: src, touch: touch},
+		buffer,
 	)
 
 	if closeWriter, ok := dst.(interface{ CloseWrite() error }); ok {
@@ -199,11 +252,10 @@ func relayTerminationReason(s *Server, first, second relayResult) string {
 }
 
 type countingWriter struct {
-	dst       io.Writer
-	counter   *atomic.Int64
-	m         *metrics.Metrics
-	direction string
-	touch     func()
+	dst        io.Writer
+	counter    *atomic.Int64
+	relayBytes prometheus.Counter
+	touch      func()
 }
 
 func (w countingWriter) Write(p []byte) (int, error) {
@@ -214,7 +266,7 @@ func (w countingWriter) Write(p []byte) (int, error) {
 	n, err := w.dst.Write(p)
 	if n > 0 {
 		w.counter.Add(int64(n))
-		w.m.RelayBytes.WithLabelValues(w.direction).Add(float64(n))
+		w.relayBytes.Add(float64(n))
 	}
 
 	return n, err

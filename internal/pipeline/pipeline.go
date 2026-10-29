@@ -2,8 +2,9 @@ package pipeline
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andev0x/socks5-proxy-analytics/internal/config"
@@ -19,6 +20,7 @@ type Pipeline struct {
 	normalizer *Normalizer
 	publisher  *Publisher
 	startOnce  sync.Once
+	started    atomic.Bool
 }
 
 // NewPipeline wires the collector, normalizer and publisher using validated configuration.
@@ -54,6 +56,7 @@ func NewPipeline(
 // Start launches normalizer workers and the publisher. Repeated calls are no-ops.
 func (p *Pipeline) Start() {
 	p.startOnce.Do(func() {
+		p.started.Store(true)
 		p.normalizer.Start()
 		p.publisher.Start()
 	})
@@ -73,8 +76,15 @@ func (p *Pipeline) Collector() *Collector {
 
 // Shutdown stops event production, drains the normalizer and flushes pending batches,
 // bounded by ctx. It must be called only after the proxy stopped emitting events.
+//
+// If ctx expires, the publisher is aborted: no further database attempts are made and every
+// remaining record is counted as permanently dropped rather than silently discarded.
 func (p *Pipeline) Shutdown(ctx context.Context) error {
 	p.collector.Close()
+
+	if !p.started.Load() {
+		return nil
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -87,6 +97,15 @@ func (p *Pipeline) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return errors.New("analytics pipeline shutdown deadline exceeded: pending events may be lost")
+		p.publisher.Abort()
+
+		// Bound the wait for drop accounting so shutdown cannot hang behind a stuck write.
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+
+		return fmt.Errorf(
+			"analytics pipeline shutdown deadline exceeded; remaining events were dropped: %w", ctx.Err())
 	}
 }

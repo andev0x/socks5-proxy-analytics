@@ -1,4 +1,4 @@
-.PHONY: help build test test-race bench clean lint docker docker-build docker-up docker-down install-tools fmt vet security release
+.PHONY: help build test test-race bench loadtest clean lint docker docker-build docker-up docker-down install-tools fmt fmt-check vet security audit release
 
 # Variables
 BINARY_DIR=bin
@@ -12,14 +12,17 @@ help:
 	@echo "  build         - Build binaries for proxy and API"
 	@echo "  test          - Run all tests"
 	@echo "  test-race     - Run all tests with the race detector"
-	@echo "  bench         - Run reproducible baseline benchmarks"
+	@echo "  bench         - Run reproducible component benchmarks"
+	@echo "  loadtest      - Run the end-to-end load harness (requires a running proxy)"
 	@echo "  test-verbose  - Run tests with verbose output"
 	@echo "  test-coverage - Run tests with coverage report"
 	@echo "  clean         - Clean build artifacts"
 	@echo "  lint          - Run golangci-lint"
 	@echo "  fmt           - Format code with gofmt"
+	@echo "  fmt-check     - Fail if any file is not gofmt-formatted"
 	@echo "  vet           - Run go vet"
 	@echo "  security      - Run security checks"
+	@echo "  audit         - Run fmt-check, vet, lint, security and race tests"
 	@echo "  install-tools - Install development tools"
 	@echo "  docker-build  - Build Docker images"
 	@echo "  docker-up     - Start services with Docker Compose"
@@ -53,8 +56,16 @@ test-race:
 	@go test -race ./...
 
 bench:
-	@echo "Running baseline benchmarks..."
-	@go test -run '^$$' -bench . -benchmem -count=3 ./internal/proxy ./internal/pipeline
+	@echo "Running component benchmarks (3 repetitions; use benchstat to compare)..."
+	@go test -run '^$$' -bench . -benchmem -count=3 ./internal/proxy ./internal/pipeline ./internal/security
+
+# End-to-end load harness. Requires a running proxy and its metrics endpoint:
+#   docker compose -f deployments/docker-compose.yml up -d
+#   make loadtest
+loadtest:
+	@echo "Running end-to-end load test..."
+	@go run ./benchmarks/loadtest -proxy 127.0.0.1:1080 -metrics http://127.0.0.1:9090/metrics \
+		-concurrency 32 -duration 30s -warmup 5s -payload 4096 -mode echo -json loadtest-result.json
 
 test-coverage:
 	@echo "Running tests with coverage..."
@@ -70,7 +81,10 @@ lint:
 fmt:
 	@echo "Formatting code..."
 	@gofmt -s -w .
-	@goimports -w .
+
+fmt-check:
+	@echo "Checking formatting..."
+	@unformatted=$$(gofmt -l .); if [ -n "$$unformatted" ]; then echo "Not gofmt-formatted:"; echo "$$unformatted"; exit 1; fi
 
 vet:
 	@echo "Running go vet..."
@@ -80,6 +94,9 @@ security:
 	@echo "Running security checks..."
 	@gosec ./...
 	@govulncheck ./...
+
+audit: fmt-check vet lint security test-race
+	@echo "Audit checks passed."
 
 # Development tools
 install-tools:
@@ -148,7 +165,7 @@ deps:
 pre-commit: fmt vet lint test
 
 # CI simulation (run what CI runs)
-ci: deps pre-commit build
+ci: deps fmt-check pre-commit build
 
 # Development workflow
 dev: clean deps build test
