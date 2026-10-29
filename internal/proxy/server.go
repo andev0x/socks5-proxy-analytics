@@ -330,7 +330,13 @@ func (s *Server) resolveCandidates(
 ) ([]net.IP, policy.Decision, bool) {
 	if host != "" {
 		resolver := &net.Resolver{}
-		resolved, err := resolver.LookupIP(context.Background(), "ip", host)
+		lookupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			time.Duration(s.cfg.Proxy.DialTimeoutMs)*time.Millisecond,
+		)
+		defer cancel()
+
+		resolved, err := resolver.LookupIP(lookupCtx, "ip", host)
 		if err != nil {
 			decision := denyDecision(s.policyEngine, req, host, pipeline.ReasonDNSFailure)
 

@@ -79,10 +79,8 @@ func (a *Authenticator) AuthenticateWithIdentity(username, password string) (str
 		return "", false
 	}
 
-	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(username)) == 1
 	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(entry.password)) == 1
-
-	if !userMatch || !passMatch {
+	if !passMatch {
 		return "", false
 	}
 

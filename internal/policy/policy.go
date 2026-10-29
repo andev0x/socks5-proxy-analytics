@@ -351,6 +351,8 @@ func validateRule(rule *Rule, index int) error {
 }
 
 func normalizeRuleIP(rule *Rule, index int) error {
+	rule.IP = canonicalIPSpec(rule.IP)
+
 	if _, _, err := net.ParseCIDR(rule.IP); err == nil {
 		return nil
 	}
@@ -384,6 +386,7 @@ func (p *Policy) prepareRestricted() {
 
 	p.restrictedNets = nil
 	for _, cidr := range p.RestrictedCIDRs {
+		cidr = canonicalIPSpec(cidr)
 		if ip := net.ParseIP(cidr); ip != nil {
 			if ip.To4() != nil {
 				cidr = ip.String() + "/32"
@@ -402,7 +405,7 @@ func (p *Policy) prepareRestricted() {
 }
 
 func (p *Policy) isRestricted(ip string) bool {
-	parsed := net.ParseIP(ip)
+	parsed := net.ParseIP(canonicalIP(ip))
 	if parsed == nil {
 		return false
 	}
@@ -421,11 +424,12 @@ func ipMatches(spec, ip string) bool {
 		return true
 	}
 
-	parsedIP := net.ParseIP(ip)
+	parsedIP := net.ParseIP(canonicalIP(ip))
 	if parsedIP == nil {
 		return false
 	}
 
+	spec = canonicalIPSpec(spec)
 	if strings.Contains(spec, "/") {
 		_, network, err := net.ParseCIDR(spec)
 		if err != nil {
@@ -460,4 +464,36 @@ func SortRules(rules []Rule) {
 
 		return rules[i].Index < rules[j].Index
 	})
+}
+
+// canonicalIP returns the canonical textual form of an IP address. IPv4-mapped IPv6
+// addresses are canonicalized to their IPv4 form so policy rules and restricted ranges
+// cannot be bypassed by an alternate address representation.
+func canonicalIP(value string) string {
+	value = strings.TrimSpace(value)
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return value
+	}
+
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+
+	return ip.String()
+}
+
+// canonicalIPSpec applies canonicalIP to the host part of an IP or CIDR specification.
+func canonicalIPSpec(value string) string {
+	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "/") {
+		return canonicalIP(value)
+	}
+
+	parts := strings.SplitN(value, "/", 2)
+	if len(parts) != 2 {
+		return value
+	}
+
+	return canonicalIP(parts[0]) + "/" + parts[1]
 }

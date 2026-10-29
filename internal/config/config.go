@@ -570,8 +570,12 @@ func (c *Config) validatePolicy() error {
 		return nil
 	}
 
-	if !c.Proxy.Auth.Enabled && len(c.Proxy.Workloads) == 0 {
-		return errors.New("policy.enabled requires proxy.auth.enabled with at least one workload")
+	if !c.Proxy.Auth.Enabled {
+		return errors.New("policy.enabled requires proxy.auth.enabled")
+	}
+
+	if len(c.Proxy.Workloads) == 0 {
+		return errors.New("policy.enabled requires at least one configured workload")
 	}
 
 	switch c.Policy.DefaultAction {

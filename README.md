@@ -3,10 +3,13 @@
 A Go SOCKS5 proxy with an asynchronous traffic-analytics pipeline, PostgreSQL storage, a
 Prometheus metrics endpoint and a small analytics API.
 
-**Phase 2 status:** controlled egress (workload identity + deterministic policy) is implemented
-and tested on top of the Phase 1 observability foundation. It remains **not production-ready**.
-See [docs/phase-2-design.md](docs/phase-2-design.md) and
-[docs/phase-2-closure-report.md](docs/phase-2-closure-report.md).
+**Phase 3 status:** final productization and operational trust work is complete as a release
+candidate with explicit limitations. Controlled egress, workload identity, deterministic policy,
+runtime reliability, and operator documentation are implemented and verified; remaining
+limitations are documented in [docs/security-and-operational-limitations.md](docs/security-and-operational-limitations.md).
+See [docs/phase-3-implementation-report.md](docs/phase-3-implementation-report.md),
+[docs/acceptance-gates.md](docs/acceptance-gates.md), and
+[docs/verification-report.md](docs/verification-report.md).
 
 - Architecture baseline: [docs/socks5-proxy-analytics-architecture.md](docs/socks5-proxy-analytics-architecture.md)
 - Phase 1 plan, decisions and evidence: [docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md)

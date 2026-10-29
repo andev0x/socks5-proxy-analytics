@@ -181,3 +181,27 @@ func TestIPv4MappedIPv6(t *testing.T) {
 	// Ensure restricted range contains mapped representation? net.IP handles.
 	_ = net.ParseIP("::ffff:127.0.0.1")
 }
+
+func TestIPv4MappedIPv6Restricted(t *testing.T) {
+	engine := NewEngine()
+	err := engine.SetPolicy(&Policy{
+		ID:              "p",
+		Version:         "1",
+		DefaultAction:   ActionDeny,
+		RestrictedCIDRs: []string{"127.0.0.0/8"},
+		Rules: []Rule{
+			{ID: "r1", Workload: "agent", Action: ActionAllow, Host: "localhost"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := engine.Evaluate(Request{Workload: "agent", Host: "localhost", IP: "::ffff:127.0.0.1", Port: 80})
+	if d.Allowed {
+		t.Fatal("expected mapped loopback to be restricted")
+	}
+	if d.Reason != "restricted_destination" {
+		t.Fatalf("reason = %q", d.Reason)
+	}
+}
