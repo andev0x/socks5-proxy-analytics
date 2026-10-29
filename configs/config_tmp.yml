@@ -16,7 +16,7 @@ api:
 database:
   host: "localhost"
   port: 5432
-  user: "anvndev"
+  user: "andev0x"
   password: ""
   database: "socksdb"
   sslmode: "disable"

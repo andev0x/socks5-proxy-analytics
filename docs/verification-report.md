@@ -4,7 +4,7 @@
 
 - OS: macOS (darwin/arm64)
 - Go: module declares `go 1.26.0`
-- PostgreSQL: local instance reachable on `/tmp` socket, user `anvndev`
+- PostgreSQL: local instance reachable on `/tmp` socket, user `andev0x`
 - Docker: not executed in this session
 
 ## Commands executed
@@ -20,7 +20,7 @@
 | `govulncheck ./...` | PASS (no vulnerabilities in project code) |
 | `gosec ./...` | PASS (0 issues) |
 | `go test -run '^$' -bench . -benchmem -count=1 ./internal/proxy ./internal/pipeline` | PASS |
-| `TEST_DB_HOST=localhost TEST_DB_PORT=5432 TEST_DB_USER=anvndev TEST_DB_PASSWORD= TEST_DB_NAME=socks5_test TEST_DB_SSLMODE=disable go test -race ./...` | PASS (storage and proxy E2E executed) |
+| `TEST_DB_HOST=localhost TEST_DB_PORT=5432 TEST_DB_USER=andev0x TEST_DB_PASSWORD= TEST_DB_NAME=socks5_test TEST_DB_SSLMODE=disable go test -race ./...` | PASS (storage and proxy E2E executed) |
 
 ## Integration coverage
 

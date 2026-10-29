@@ -1,40 +1,57 @@
 # SOCKS5 Proxy Analytics
 
-A Go SOCKS5 proxy with an asynchronous traffic-analytics pipeline, PostgreSQL storage, a
-Prometheus metrics endpoint and a small analytics API.
+A Go SOCKS5 proxy (TCP CONNECT) with an asynchronous traffic-analytics pipeline,
+PostgreSQL storage, Prometheus metrics, and a small analytics REST API.
 
-**Phase 3 status:** final productization and operational trust work is complete as a release
-candidate with explicit limitations. Controlled egress, workload identity, deterministic policy,
-runtime reliability, and operator documentation are implemented and verified; remaining
-limitations are documented in [docs/security-and-operational-limitations.md](docs/security-and-operational-limitations.md).
-See [docs/phase-3-implementation-report.md](docs/phase-3-implementation-report.md),
-[docs/acceptance-gates.md](docs/acceptance-gates.md), and
-[docs/verification-report.md](docs/verification-report.md).
+## Table of contents
 
-- Architecture baseline: [docs/socks5-proxy-analytics-architecture.md](docs/socks5-proxy-analytics-architecture.md)
-- Phase 1 plan, decisions and evidence: [docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md)
-- Benchmarks and methodology: [docs/benchmarks.md](docs/benchmarks.md)
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Analytics API](#analytics-api)
+- [Metrics](#metrics)
+- [Security](#security)
+- [Deployment](#deployment)
+- [Development](#development)
+- [Testing](#testing)
+- [Limitations](#limitations)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
-## What is implemented
+## Overview
 
-| Area | Phase 1 behavior |
-| --- | --- |
-| SOCKS5 | RFC 1928 **CONNECT over TCP**; IPv4, IPv6 and domain address types |
-| Authentication | Optional RFC 1929 username/password, enforced in the handshake |
-| Client rules | Exact-IP/CIDR allowlist and per-source-IP new-connection rate limit |
-| Limits | `max_connections`, handshake timeout and upstream dial timeout are enforced |
-| Relay accounting | Explicit client→upstream and upstream→client byte counters |
-| Attribution | Client address, requested hostname and resolved destination IP stored separately |
-| Outcomes | Every admitted session produces one event, including dial, auth and handshake failure paths |
-| Metrics | Prometheus registry served on a real endpoint and updated by runtime paths |
-| Pipeline | Bounded best-effort queue, batching, bounded retries, visible loss |
-| Shutdown | Stop accept, bounded session grace, drain producers, flush final batch, close DB |
-| API | Destination/client aggregate queries, traffic logs, DB-backed health |
+The proxy and the analytics API are separate processes that share a PostgreSQL
+database. The proxy never performs database I/O on the forwarding path: connection
+events are handed to a bounded, best-effort pipeline that normalizes and batch-
+inserts them asynchronously.
 
-BIND and UDP ASSOCIATE are intentionally **not supported** and are rejected with a SOCKS5
-"command not supported" reply.
+Every admitted SOCKS5 session produces exactly one analytics event, including dial,
+authentication, and handshake failure paths. Pre-handshake rejections (connection
+limit, rate limit, client allowlist) are counted in metrics and logs but do not
+fabricate an event.
 
-## Architecture map
+## Features
+
+- RFC 1928 SOCKS5 `CONNECT` over TCP (IPv4, IPv6, domain address types).
+- Optional RFC 1929 username/password authentication.
+- Client rules: exact-IP/CIDR allowlist and per-source-IP new-connection rate limit.
+- Enforced limits: `max_connections`, handshake timeout, upstream dial timeout.
+- Explicit client→upstream and upstream→client byte counters.
+- Separate attribution of client address, requested hostname, and resolved
+  destination IP.
+- Prometheus registry on a real endpoint, updated by runtime paths.
+- Bounded best-effort queue with batching, bounded retries, and visible loss.
+- Graceful shutdown: stop accept, bounded session grace, drain producers, flush.
+- Analytics API: destination/client aggregates, traffic logs, DB-backed health.
+- Deterministic Phase 2 workload identity and egress policy (default deny).
+
+BIND and UDP ASSOCIATE are intentionally **not supported** and are rejected with a
+SOCKS5 "command not supported" reply.
+
+## Architecture
 
 ```
 cmd/proxy                 proxy process: listener, metrics server, pipeline, DB
@@ -47,76 +64,15 @@ internal/storage          PostgreSQL/GORM repository and schema migration
 internal/metrics          dedicated Prometheus registry and HTTP handler
 internal/handlers         analytics API handlers and input validation
 internal/config           validated configuration and environment overrides
+internal/policy           workload identity and deterministic egress policy
 ```
 
-The proxy and API are separate processes. Both require PostgreSQL at startup. The proxy
-never performs database I/O on the forwarding path.
+See [docs/socks5-proxy-analytics-architecture.md](docs/socks5-proxy-analytics-architecture.md)
+for the architecture baseline and [ARCHITECTURE.md](ARCHITECTURE.md) for the pointer.
 
-## Event semantics
+## Quick start
 
-Every admitted SOCKS5 session emits exactly one analytics event. Pre-handshake rejects
-(connection limit, rate limit, client allowlist) are counted in metrics/logs but have no
-destination and therefore do not fabricate an event.
-
-| Field | Meaning |
-| --- | --- |
-| `event_id` | Random correlation/deduplication identity (unique index) |
-| `client_ip`, `client_port` | Peer of the **SOCKS5 TCP connection** (never the upstream) |
-| `requested_host` | Hostname exactly as requested; empty for IP literals |
-| `destination_ip` | IP actually dialed, taken from the established upstream socket |
-| `destination_port` | Requested destination port |
-| `protocol` | `tcp` |
-| `outcome` | `connected`, `dial_failed`, `auth_failed`, `handshake_failed` |
-| `termination_reason` | `client_close`, `upstream_close`, `relay_error`, `server_shutdown`, `dial_error`, `auth_failed`, `no_acceptable_auth`, `malformed_request`, `unsupported_command`, `unsupported_address_type` |
-| `timestamp` | Session start (accept time) |
-| `duration_ms` | Accept-to-finish duration in milliseconds |
-| `dial_latency_ms` | Upstream TCP connect latency in milliseconds (may round to 0 locally) |
-| `bytes_client_to_upstream` | Application bytes read from client and written upstream |
-| `bytes_upstream_to_client` | Application bytes read downstream and written to client |
-| `schema_version` | Event schema version (`1`) |
-
-**Byte rule:** counters include only application payload relayed after the SOCKS5 success
-reply. Handshake, authentication and request bytes are excluded. Both directions are tested
-with controlled payloads.
-
-## Delivery guarantee (best-effort telemetry)
-
-Connection analytics are **best-effort telemetry, not a durable audit log**:
-
-- the queue is bounded by `PIPELINE_BUFFER_SIZE`;
-- enqueue is non-blocking; when full, the event is dropped and counted in
-  `pipeline_events_dropped_total{stage="collector"}`;
-- a batch is written atomically with a unique `event_id`; retries are bounded by
-  `PIPELINE_MAX_RETRIES` with exponential backoff;
-- after retries are exhausted the batch is dropped and counted in
-  `pipeline_publish_failures_total` and `pipeline_events_publish_dropped_total`; it is never
-  reported as published;
-- shutdown drains producers and flushes the final batch under
-  `PIPELINE_FLUSH_TIMEOUT_MS` and the overall `SHUTDOWN_TIMEOUT_MS`;
-- events accepted but not yet persisted when the process is killed are lost.
-
-PostgreSQL is a required startup dependency because schema migration and repository
-initialization happen at boot. A **runtime** database outage does not stop forwarding; it
-degrades analytics and becomes visible in metrics and logs.
-
-## Security controls
-
-- **Authentication:** when `PROXY_AUTH_ENABLED=true`, the server requires RFC 1929
-  username/password authentication. Empty credentials fail startup validation.
-- **Client allowlist:** `PROXY_IP_WHITELIST` accepts exact IPs and CIDR ranges. Invalid
-  entries fail startup; they are never silently ignored. Empty means allow all clients.
-- **Rate limit:** `RATE_LIMIT_ENABLED` limits new TCP connections per source IP with a token
-  bucket. The bucket map is bounded by `RATE_LIMIT_MAX_TRACKED_CLIENTS`.
-- **Connection limit:** `PROXY_MAX_CONNECTIONS` is enforced at accept time.
-- **Exposure:** proxy/API/metrics bind to `127.0.0.1` by default. Binding the proxy to a
-  non-loopback address with authentication disabled logs a warning. The API and metrics
-  endpoint have no authentication; keep them loopback or behind a trusted network boundary.
-- Credentials are never logged, stored in events or used as metric labels.
-- Prometheus labels are bounded enums only; hostnames, IPs and request IDs are not labels.
-
-## Quick start (local, clean checkout)
-
-Prerequisites: Go 1.26.10+, PostgreSQL 15+ (16+ recommended), and a database user.
+Prerequisites: Go 1.26.10+, PostgreSQL 15+ (16+ recommended).
 
 ```bash
 git clone <repo-url> socks5-proxy-analytics
@@ -133,13 +89,6 @@ psql -d postgres -c "CREATE ROLE socks5 LOGIN PASSWORD 'socks5_local_dev_passwor
 psql -d postgres -c "CREATE DATABASE socks5_analytics OWNER socks5;"
 ```
 
-`configs/config.yml` is optional and gitignored. Start with environment variables only, or
-copy the example:
-
-```bash
-cp configs/config.example.yml configs/config.yml
-```
-
 Run the two processes in separate terminals:
 
 ```bash
@@ -147,10 +96,10 @@ go run ./cmd/proxy
 go run ./cmd/api
 ```
 
-The proxy listens on `127.0.0.1:1080`, metrics/health on `127.0.0.1:9090`, and the API on
-`127.0.0.1:8080`. The schema is migrated automatically at startup.
+The proxy listens on `127.0.0.1:1080`, metrics/health on `127.0.0.1:9090`, and the
+API on `127.0.0.1:8080`. The schema is migrated automatically at startup.
 
-### Verify a real request
+Verify a real request:
 
 ```bash
 curl --proxy socks5h://127.0.0.1:1080 http://example.com/
@@ -163,10 +112,75 @@ Wait up to `PIPELINE_FLUSH_INTERVAL_MS` before expecting the event in PostgreSQL
 
 ### Graceful shutdown
 
-Send `SIGTERM`/`SIGINT` to the proxy process. It stops accepting new connections, waits up
-to `PROXY_SHUTDOWN_GRACE_MS` for active sessions (then force-closes them), drains the
-pipeline, flushes pending batches, closes the metrics server and database, and logs
-`shutdown complete` with `clean=true|false`.
+Send `SIGTERM`/`SIGINT` to the proxy process. It stops accepting new connections,
+waits up to `PROXY_SHUTDOWN_GRACE_MS` for active sessions (then force-closes them),
+drains the pipeline, flushes pending batches, closes the metrics server and
+database, and logs `shutdown complete` with `clean=true|false`.
+
+## Event semantics
+
+Every admitted session emits exactly one analytics event. Pre-handshake rejects
+have no destination and therefore do not fabricate an event.
+
+| Field | Meaning |
+| --- | --- |
+| `event_id` | Random correlation/deduplication identity (unique index) |
+| `client_ip`, `client_port` | Peer of the **SOCKS5 TCP connection** (never the upstream) |
+| `requested_host` | Hostname exactly as requested; empty for IP literals |
+| `destination_ip` | IP actually dialed, taken from the established upstream socket |
+| `destination_port` | Requested destination port |
+| `protocol` | `tcp` |
+| `outcome` | `connected`, `dial_failed`, `auth_failed`, `handshake_failed`, `policy_denied` |
+| `termination_reason` | `client_close`, `upstream_close`, `relay_error`, `server_shutdown`, `dial_error`, `auth_failed`, `no_acceptable_auth`, `malformed_request`, `unsupported_command`, `unsupported_address_type`, `policy_denied`, `policy_error` |
+| `timestamp` | Session start (accept time) |
+| `duration_ms` | Accept-to-finish duration in milliseconds |
+| `dial_latency_ms` | Upstream TCP connect latency in milliseconds (may round to 0 locally) |
+| `bytes_client_to_upstream` | Application bytes read from client and written upstream |
+| `bytes_upstream_to_client` | Application bytes read downstream and written to client |
+| `schema_version` | Event schema version (`1`) |
+
+**Byte rule:** counters include only application payload relayed after the SOCKS5
+success reply. Handshake, authentication and request bytes are excluded. Both
+directions are tested with controlled payloads.
+
+## Delivery guarantee (best-effort telemetry)
+
+Connection analytics are **best-effort telemetry, not a durable audit log**:
+
+- the queue is bounded by `PIPELINE_BUFFER_SIZE`;
+- enqueue is non-blocking; when full, the event is dropped and counted in
+  `pipeline_events_dropped_total{stage="collector"}`;
+- a batch is written atomically with a unique `event_id`; retries are bounded by
+  `PIPELINE_MAX_RETRIES` with exponential backoff;
+- after retries are exhausted the batch is dropped and counted in
+  `pipeline_publish_failures_total` and `pipeline_events_publish_dropped_total`;
+  it is never reported as published;
+- shutdown drains producers and flushes the final batch under
+  `PIPELINE_FLUSH_TIMEOUT_MS` and the overall `SHUTDOWN_TIMEOUT_MS`;
+- events accepted but not yet persisted when the process is killed are lost.
+
+PostgreSQL is a required startup dependency because schema migration and
+repository initialization happen at boot. A **runtime** database outage does not
+stop forwarding; it degrades analytics and becomes visible in metrics and logs.
+
+## Security controls
+
+- **Authentication:** when `PROXY_AUTH_ENABLED=true`, the server requires RFC 1929
+  username/password authentication. Empty credentials fail startup validation.
+- **Client allowlist:** `PROXY_IP_WHITELIST` accepts exact IPs and CIDR ranges.
+  Invalid entries fail startup; they are never silently ignored. Empty means allow
+  all clients.
+- **Rate limit:** `RATE_LIMIT_ENABLED` limits new TCP connections per source IP
+  with a token bucket. The bucket map is bounded by
+  `RATE_LIMIT_MAX_TRACKED_CLIENTS`.
+- **Connection limit:** `PROXY_MAX_CONNECTIONS` is enforced at accept time.
+- **Exposure:** proxy/API/metrics bind to `127.0.0.1` by default. Binding the
+  proxy to a non-loopback address with authentication disabled logs a warning.
+  The API and metrics endpoint have no authentication; keep them loopback or
+  behind a trusted network boundary.
+- Credentials are never logged, stored in events or used as metric labels.
+- Prometheus labels are bounded enums only; hostnames, IPs and request IDs are
+  not labels.
 
 ## Docker Compose
 
@@ -176,26 +190,28 @@ The Compose file uses development-only defaults and loopback port bindings:
 docker compose -f deployments/docker-compose.yml up --build
 ```
 
-Compose reads `.env` from the Compose project directory (the directory containing the
-Compose file) by default. To use the repository-root `.env`, pass
+Compose reads `.env` from the Compose project directory (the directory containing
+the Compose file) by default. To use the repository-root `.env`, pass
 `--env-file .env`; shell environment variables also override the defaults.
 
-Published ports: `127.0.0.1:1080` (SOCKS5), `127.0.0.1:8080` (API), `127.0.0.1:9090`
-(metrics). PostgreSQL is not published to the host. Override `DB_USER`, `DB_PASSWORD` and
-`DB_NAME` via `.env` or the shell for anything beyond local development. Verify:
+Published ports: `127.0.0.1:1080` (SOCKS5), `127.0.0.1:8080` (API),
+`127.0.0.1:9090` (metrics). PostgreSQL is not published to the host. Override
+`DB_USER`, `DB_PASSWORD` and `DB_NAME` via `.env` or the shell for anything
+beyond local development. Verify:
 
 ```bash
 curl --proxy socks5h://127.0.0.1:1080 http://api:8080/health
 curl -s http://127.0.0.1:9090/metrics | head
 ```
 
-The proxy container resolves `api` on the Compose network; `socks5h` makes the proxy perform
-DNS resolution, which exercises the domain-name path and analytics attribution.
+The proxy container resolves `api` on the Compose network; `socks5h` makes the
+proxy perform DNS resolution, which exercises the domain-name path and analytics
+attribution.
 
 ## Configuration reference
 
-Environment variables override the YAML file. `CONFIG_FILE` selects an explicit YAML file;
-`CONFIG_PATH` selects a directory (default `./configs`). See
+Environment variables override the YAML file. `CONFIG_FILE` selects an explicit
+YAML file; `CONFIG_PATH` selects a directory (default `./configs`). See
 [configs/config.example.yml](configs/config.example.yml) and [.env.example](.env.example).
 
 ### Proxy
@@ -264,14 +280,14 @@ Workloads and rules are configured in YAML (`proxy.workloads`, `policy.rules`).
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
 
-Invalid values, a missing required DB setting, enabled auth with empty credentials, or a
-malformed allowlist entry fail startup with an actionable error.
+Invalid values, a missing required DB setting, enabled auth with empty credentials,
+or a malformed allowlist entry fail startup with an actionable error.
 
 ## Metrics
 
-`GET http://127.0.0.1:9090/metrics` (Prometheus text format) and
-`GET /healthz` on the same listener. `/healthz` reports proxy process liveness; it is not a
-database readiness check. The API process serves PostgreSQL-backed readiness at `GET /health`
+`GET http://127.0.0.1:9090/metrics` (Prometheus text format) and `GET /healthz` on
+the same listener. `/healthz` reports proxy process liveness; it is not a database
+readiness check. The API process serves PostgreSQL-backed readiness at `GET /health`
 and does not serve proxy metrics.
 
 | Metric | Type | Meaning |
@@ -313,9 +329,9 @@ All routes are unauthenticated in Phase 1 and bind to loopback by default.
 | `GET /stats/traffic?start=&end=` | Aggregate bytes, connections, latency, duration |
 | `GET /logs/traffic?limit=100&offset=0&start=&end=` | Paginated records |
 
-`limit` is clamped to `1..1000`; `offset` must be non-negative. Timestamps use RFC3339.
-The default range is the last 24 hours; ranges longer than 90 days or `end < start` return
-`400`.
+`limit` is clamped to `1..1000`; `offset` must be non-negative. Timestamps use
+RFC3339. The default range is the last 24 hours; ranges longer than 90 days or
+`end < start` return `400`.
 
 Example record:
 
@@ -352,13 +368,13 @@ govulncheck ./...
 gosec ./...
 ```
 
-The PostgreSQL integration test is skipped unless `TEST_DB_HOST` is set; a skipped test is
-not a pass:
+The PostgreSQL integration test is skipped unless `TEST_DB_HOST` is set; a skipped
+test is not a pass:
 
 ```bash
 TEST_DB_HOST=localhost TEST_DB_PORT=5432 TEST_DB_USER=socks5 \
-TEST_DB_PASSWORD=change_me TEST_DB_NAME=socks5_analytics_test \
-go test -v ./internal/storage
+  TEST_DB_PASSWORD=change_me TEST_DB_NAME=socks5_analytics_test \
+  go test -v ./internal/storage
 ```
 
 Reproducible baseline benchmarks:
@@ -367,32 +383,53 @@ Reproducible baseline benchmarks:
 go test -run '^$' -bench . -benchmem -count=3 ./internal/proxy ./internal/pipeline
 ```
 
-Methodology, environment and measured results are in [docs/benchmarks.md](docs/benchmarks.md).
+Methodology, environment and measured results are in
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Schema and upgrade note
 
 Phase 1 replaced ambiguous legacy columns with explicit fields (`client_ip`,
-`requested_host`, `bytes_client_to_upstream`, `bytes_upstream_to_client`, `outcome`,
-`termination_reason`, `schema_version`). `AutoMigrate` adds the new columns but does not
-drop old ones. Legacy rows keep their old values and should be treated as schema version 0;
-historical `source_ip` values may have contained the upstream address. There is no
-versioned migration tool or retention policy yet.
+`requested_host`, `bytes_client_to_upstream`, `bytes_upstream_to_client`,
+`outcome`, `termination_reason`, `schema_version`). `AutoMigrate` adds the new
+columns but does not drop old ones. Legacy rows keep their old values and should
+be treated as schema version 0; historical `source_ip` values may have contained
+the upstream address. There is no versioned migration tool or retention policy
+yet.
 
 ## Limitations and non-goals
 
 - Best-effort analytics: no durable replay, no retention policy, no audit guarantee.
 - TCP CONNECT only; BIND/UDP ASSOCIATE rejected.
 - Idle-session timeout is configurable (`PROXY_IDLE_TIMEOUT_MS`), disabled by default.
-- Phase 2 workload identity and destination policy are implemented; policy defaults to deny
-  and requires explicit allow rules.
+- Phase 2 workload identity and destination policy are implemented; policy defaults
+  to deny and requires explicit allow rules.
 - API and metrics endpoints are unauthenticated; loopback defaults are the Phase 1 boundary.
 - `AutoMigrate` remains the schema mechanism.
-- Docker Compose build/runtime was verified locally with Colima: images built, all services
-  became healthy, a `socks5h` request through the published proxy port reached the API
-  container, and the resulting event was persisted and returned by the analytics API.
-  Published host ports may need adjustment if 1080/8080/9090 are already in use.
-- Not production-ready: no threat-model review, retention policy, rate limit on the API, or
-  multi-instance durability.
+- Docker Compose build/runtime was verified locally with Colima: images built, all
+  services became healthy, a `socks5h` request through the published proxy port
+  reached the API container, and the resulting event was persisted and returned by
+  the analytics API. Published host ports may need adjustment if 1080/8080/9090
+  are already in use.
+- Not production-ready: no threat-model review, retention policy, rate limit on the
+  API, or multi-instance durability.
+
+## Documentation
+
+- Architecture baseline:
+  [docs/socks5-proxy-analytics-architecture.md](docs/socks5-proxy-analytics-architecture.md)
+- Phase 1 plan, decisions and evidence:
+  [docs/phase-1-implementation-plan.md](docs/phase-1-implementation-plan.md)
+- Operations guide: [docs/operations.md](docs/operations.md)
+- Benchmarks and methodology: [docs/benchmarks.md](docs/benchmarks.md)
+- Security and operational limitations:
+  [docs/security-and-operational-limitations.md](docs/security-and-operational-limitations.md)
+- Scope and roadmap: [docs/scope.md](docs/scope.md)
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development
+setup, coding standards, and the pull request process. Please read the
+[Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
 ## License
 

@@ -1,6 +1,6 @@
 # SOCKS5 Proxy Server with Traffic Analysis (Golang)
 ## Project: socks5-proxy-analytics
-## Author: anvndev
+## Author: andev0x
 
 > Phase 1 implementation note: the current event schema, delivery contract and runtime
 > wiring are documented in [phase-1-implementation-plan.md](phase-1-implementation-plan.md)
