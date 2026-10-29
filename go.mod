@@ -1,8 +1,6 @@
 module github.com/andev0x/socks5-proxy-analytics
 
-go 1.26.0
-
-toolchain go1.26.10
+go 1.26.10
 
 require (
 	github.com/gin-gonic/gin v1.11.0
