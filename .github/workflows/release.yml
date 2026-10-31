@@ -30,7 +30,7 @@ jobs:
     # setup-go's built-in module/build cache replaces the separate
     # actions/cache@v3 step (v3 is deprecated and duplicated the same cache).
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: '1.26.10'
         cache: true
