@@ -4,6 +4,7 @@
 BINARY_DIR=bin
 PROXY_BINARY=$(BINARY_DIR)/proxy
 API_BINARY=$(BINARY_DIR)/api
+TUI_BINARY=$(BINARY_DIR)/tui
 DOCKER_COMPOSE=deployments/docker-compose.yml
 
 # Default target
@@ -30,7 +31,7 @@ help:
 	@echo "  release       - Build release binaries for all platforms"
 
 # Build targets
-build: $(PROXY_BINARY) $(API_BINARY)
+build: $(PROXY_BINARY) $(API_BINARY) $(TUI_BINARY)
 
 $(PROXY_BINARY):
 	@mkdir -p $(BINARY_DIR)
@@ -41,6 +42,11 @@ $(API_BINARY):
 	@mkdir -p $(BINARY_DIR)
 	@echo "Building API binary..."
 	@go build -ldflags="-w -s" -o $(API_BINARY) ./cmd/api/main.go
+
+$(TUI_BINARY):
+	@mkdir -p $(BINARY_DIR)
+	@echo "Building TUI binary..."
+	@go build -ldflags="-w -s" -o $(TUI_BINARY) ./cmd/tui/main.go
 
 # Test targets
 test:

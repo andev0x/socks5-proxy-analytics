@@ -411,6 +411,34 @@ be treated as schema version 0; historical `source_ip` values may have contained
 the upstream address. There is no versioned migration tool or retention policy
 yet.
 
+## TUI (terminal monitor)
+
+A read-only terminal monitor is available as `cmd/tui`. It consumes the proxy's
+Prometheus endpoint and the analytics API; it does not start or stop the proxy.
+
+Build and run:
+
+```bash
+go build -o bin/tui ./cmd/tui
+./bin/tui --metrics-url http://127.0.0.1:9090/metrics --api-url http://127.0.0.1:8080
+```
+
+Flags: `--refresh`, `--timeout`, `--limit`, `--redact-client-ips`, `--once`, `--json`.
+
+Keys: `1-4` views, `/` filter, `j/k` navigate, `Enter` detail, `p` pause,
+`r` refresh, `?` help, `q` quit. Pausing freezes the view only; backend
+collection continues.
+
+One-shot mode for scripts:
+
+```bash
+./bin/tui --once
+./bin/tui --once --json
+```
+
+Metric and data semantics are documented in the proxy's Prometheus output and the
+analytics API. Unavailable metrics are shown as `N/A`, not zero.
+
 ## Limitations and non-goals
 
 - Best-effort analytics: no durable replay, no retention policy, no audit guarantee.
