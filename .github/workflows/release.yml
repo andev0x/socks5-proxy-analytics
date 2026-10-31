@@ -1,5 +1,7 @@
 name: Release
 
+# Cost policy: tags are cut rarely, so the full build runs here. It still runs
+# on ubuntu-latest only, with a hard timeout and no redundant cache actions.
 on:
   push:
     tags:
@@ -8,10 +10,16 @@ on:
 permissions:
   contents: write
 
+# Never cancel a release halfway: a partial upload would be worse than waiting.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
     - name: Checkout code
@@ -19,29 +27,25 @@ jobs:
       with:
         fetch-depth: 0
 
+    # setup-go's built-in module/build cache replaces the separate
+    # actions/cache@v3 step (v3 is deprecated and duplicated the same cache).
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.26.10'
+        cache: true
 
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-
+    # Cheap guard against tagging a commit that never passed CI.
     - name: Run tests
       run: go test ./...
 
     - name: Build release binaries
+      env:
+        CGO_ENABLED: "0"
       run: |
+        set -euo pipefail
         mkdir -p dist
 
-        # Build for multiple platforms
         platforms=(
           "linux/amd64"
           "linux/arm64"
@@ -55,21 +59,20 @@ jobs:
           GOOS=${platform_split[0]}
           GOARCH=${platform_split[1]}
 
-          # Set binary extension for Windows
           ext=""
-          if [ $GOOS = "windows" ]; then
+          if [ "$GOOS" = "windows" ]; then
             ext=".exe"
           fi
 
-          # Build proxy binary
           output_name="socks5-proxy-${GOOS}-${GOARCH}${ext}"
           echo "Building $output_name..."
-          env GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-w -s" -o dist/$output_name ./cmd/proxy/main.go
+          GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-w -s" \
+            -o "dist/$output_name" ./cmd/proxy
 
-          # Build API binary
           output_name="socks5-api-${GOOS}-${GOARCH}${ext}"
           echo "Building $output_name..."
-          env GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-w -s" -o dist/$output_name ./cmd/api/main.go
+          GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-w -s" \
+            -o "dist/$output_name" ./cmd/api
         done
 
     - name: Generate checksums
@@ -80,13 +83,9 @@ jobs:
     - name: Generate changelog
       id: changelog
       run: |
-        # Get the tag name
         TAG_NAME=${GITHUB_REF#refs/tags/}
-
-        # Get previous tag for changelog generation
         PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
 
-        # Generate changelog
         if [ -n "$PREV_TAG" ]; then
           echo "## Changes since $PREV_TAG" > changelog.md
           git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD >> changelog.md
@@ -95,12 +94,11 @@ jobs:
           echo "First release of SOCKS5 Proxy Analytics" >> changelog.md
         fi
 
-        # Set output for release notes
         {
           echo 'changelog<<EOF'
           cat changelog.md
           echo EOF
-        } >> $GITHUB_OUTPUT
+        } >> "$GITHUB_OUTPUT"
 
     - name: Create Release
       uses: softprops/action-gh-release@v3
